@@ -41,6 +41,11 @@ try:
 except ImportError:
     HeartAgent = None
 
+try:
+    from .optimized_agent import OptimizedAgent
+except ImportError:
+    OptimizedAgent = None
+
 # Export everything that was imported successfully
 __all__ = [
     'BrainHeartException',
@@ -63,3 +68,5 @@ if BrainAgent is not None:
     __all__.append('BrainAgent')
 if HeartAgent is not None:
     __all__.append('HeartAgent')
+if OptimizedAgent is not None:
+    __all__.append('OptimizedAgent')

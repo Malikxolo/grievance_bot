@@ -280,7 +280,7 @@ def render_rag_sidebar():
 # Import core system
 try:
     from core import (
-        Config, LLMClient, BrainAgent, HeartAgent, 
+        Config, LLMClient, OptimizedAgent, 
         ToolManager, BrainHeartException
     )
     SYSTEM_AVAILABLE = True
@@ -320,28 +320,26 @@ def initialize_config():
         return {"status": "error", "error": str(e)}
 
 
-async def create_agents_async(config, brain_model_config, heart_model_config, web_model_config, use_premium_search=False):
-    """Create Brain and Heart agents with selected models"""
+async def create_agents_async(config, agent_model_config, web_model_config, use_premium_search=False):
+    """Create Optimized Agent with selected models"""
     try:
-        # Create LLM clients
-        brain_llm = LLMClient(brain_model_config)
-        heart_llm = LLMClient(heart_model_config)
+        # Create LLM clients (use same config for both brain and heart)
+        agent_llm = LLMClient(agent_model_config)
         
-        # Create tool manager with web model config
-        tool_manager = ToolManager(config, brain_llm, web_model_config, use_premium_search)
+        # Create tool manager
+        tool_manager = ToolManager(config, agent_llm, web_model_config, use_premium_search)
         
-        # Create agents
-        brain_agent = BrainAgent(brain_llm, tool_manager)
-        heart_agent = HeartAgent(heart_llm)
+        # Create optimized agent (uses same LLM for both brain and heart functions)
+        optimized_agent = OptimizedAgent(agent_llm, agent_llm, tool_manager)
         
         return {
-            "brain_agent": brain_agent,
-            "heart_agent": heart_agent,
+            "optimized_agent": optimized_agent,
             "tool_manager": tool_manager,
             "status": "success"
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
 
 
 def display_model_selector(config, agent_name: str):
@@ -385,39 +383,25 @@ def display_web_model_selector(config, agent_name: str):
     return model
 
 
-async def process_query_real(query: str, brain_agent, heart_agent, style: str, user_id: str = None) -> Dict[str, Any]:
-    """Process query through REAL Brain-Heart system - NO HARDCODING"""
+async def process_query_real(query: str, optimized_agent, style: str, user_id: str = None, chat_history: List = None) -> Dict[str, Any]:
+    """Process query through Optimized Agent"""
     
     try:
         start_time = time.time()
         
-        # Phase 1: Brain Agent Processing (REAL LLM-driven orchestration)
-        st.info("🧠 Brain Agent analyzing query and selecting tools...")
-        brain_result = await brain_agent.process_query(query, user_id=user_id)
+        # Single agent processing
+        st.info("🚀 Optimized Agent processing query...")
+        result = await optimized_agent.process_query(query, chat_history=chat_history, user_id=user_id)
         
-        brain_time = time.time() - start_time
+        total_time = time.time() - start_time
         
-        # Phase 2: Heart Agent Synthesis (REAL LLM-driven synthesis)
-        if brain_result.get("success"):
-            st.info("❤️ Heart Agent synthesizing optimal response...")
-            heart_result = await heart_agent.synthesize_response(
-                brain_result, query, style
-            )
-            
-            total_time = time.time() - start_time
-            
-            return {
-                "success": True,
-                "brain_result": brain_result,
-                "heart_result": heart_result,
-                "brain_time": brain_time,
-                "total_time": total_time
-            }
+        if result.get("success"):
+            result["total_time"] = total_time
+            return result
         else:
             return {
                 "success": False,
-                "error": brain_result.get("error", "Brain processing failed"),
-                "brain_result": brain_result
+                "error": result.get("error", "Processing failed")
             }
             
     except Exception as e:
@@ -428,7 +412,7 @@ async def process_query_real(query: str, brain_agent, heart_agent, style: str, u
 
 
 def display_real_results(result: Dict[str, Any], query: str):
-    """Display REAL results from Brain-Heart processing"""
+    """Display results from Optimized Agent"""
     
     if not result.get("success"):
         st.error(f"❌ Processing failed: {result.get('error', 'Unknown error')}")
@@ -436,122 +420,79 @@ def display_real_results(result: Dict[str, Any], query: str):
             st.json(result)
         return
     
-    brain_result = result["brain_result"]
-    heart_result = result["heart_result"]
-    
-    # ✅ SAFE HANDLING - Check if heart_result is actually a dict
-    if not isinstance(heart_result, dict):
-        st.error(f"❌ Processing failed: Heart Agent returned invalid response type: {type(heart_result)}")
-        st.write(f"Heart result: {heart_result}")
-        return
-    
-    # Main response from Heart Agent (REAL LLM synthesis)
+    # Main response from Optimized Agent
     st.markdown("## 💎 Final Response")
-    response = heart_result.get("response", "No response generated")
+    response = result.get("response", "No response generated")
     if response:
         st.markdown(response)
     else:
-        st.warning("No response generated by Heart Agent")
+        st.warning("No response generated by Optimized Agent")
     
     # Performance metrics
+    processing_time = result.get("processing_time", {})
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("🧠 Brain Time", f"{result.get('brain_time', 0):.2f}s")
+        st.metric("⚡ Analysis Time", f"{processing_time.get('analysis', 0):.2f}s")
     with col2:
-        st.metric("⏱️ Total Time", f"{result.get('total_time', 0):.2f}s")
+        st.metric("⏱️ Total Time", f"{processing_time.get('total', 0):.2f}s")
     with col3:
-        tools_used = brain_result.get("tools_used", [])
+        tools_used = result.get("tools_used", [])
         st.metric("🛠️ Tools Used", len(tools_used))
     
     # Detailed analysis tabs
-    tab1, tab2, tab3 = st.tabs(["🧠 Brain Analysis", "❤️ Heart Synthesis", "🔍 Raw Data"])
+    tab1, tab2, tab3 = st.tabs(["🚀 Analysis", "🛠️ Tool Results", "🔍 Raw Data"])
     
     with tab1:
-        st.markdown("### 🧠 Brain Agent Execution Details")
+        st.markdown("### 🚀 Optimized Agent Analysis")
         
-        plan = brain_result.get("plan", {})
-        if plan:
-            st.markdown("**LLM-Generated Plan:**")
-            st.markdown(f"- **Approach:** {plan.get('approach', 'Unknown')}")
-            st.markdown(f"- **Reasoning:** {plan.get('reasoning', 'Not provided')}")
+        analysis = result.get("analysis", {})
+        if analysis:
+            st.markdown("**Semantic Intent:**")
+            st.markdown(f"- {analysis.get('semantic_intent', 'Unknown')}")
+            
+            business_opp = analysis.get('business_opportunity', {})
+            if business_opp.get('detected'):
+                st.markdown("**Business Opportunity Detected:**")
+                st.markdown(f"- Score: {business_opp.get('score', 0)}/100")
+                st.markdown(f"- Pain Points: {', '.join(business_opp.get('pain_points', []))}")
             
             if tools_used:
-                st.markdown("**Tools Selected by Brain Agent:**")
+                st.markdown("**Tools Selected:**")
                 for tool in tools_used:
                     st.markdown(f"- {tool}")
-        
-        # Show actual execution results
-        execution_results = brain_result.get("execution_results", {})
-        if execution_results:
-            st.markdown("**Actual Tool Execution Results:**")
-            
-            # ✅ Handle "no tools used" case
-            if execution_results.get("no_tools_used"):
-                st.info("🗣️ No tools needed - conversational response generated directly")
-            else:
-                # Regular tool execution results
-                for step_key, step_result in execution_results.items():
-                    # ✅ Skip non-step entries
-                    if not step_key.startswith("step_"):
-                        continue
-                        
-                    if isinstance(step_result, dict):  # ✅ Safety check
-                        with st.expander(f"Step {step_key.split('_')[1]} - {step_result.get('tool', 'Unknown')}"):
-                            if step_result.get('result'):
-                                result_data = step_result['result']
-                                if isinstance(result_data, dict):
-                                    # Show formatted results for specific tools
-                                    if result_data.get('tool_name') == 'calculator':
-                                        if result_data.get('success'):
-                                            st.success(f"Calculation Result: {result_data.get('formatted_result', result_data.get('result'))}")
-                                        else:
-                                            st.error(f"Calculation Error: {result_data.get('error')}")
-                                    elif result_data.get('tool_name') == 'web_search':
-                                        if result_data.get('success'):
-                                            st.success(f"Found {result_data.get('total_results', 0)} results using {result_data.get('provider', 'unknown')} provider")
-                                            # Show model used for Perplexity
-                                            if result_data.get('provider') == 'perplexity' and result_data.get('model_used'):
-                                                st.info(f"Model used: {result_data.get('model_used')}")
-                                            
-                                            for i, search_result in enumerate(result_data.get('results', [])):
-                                                st.markdown(f"**{i+1}. {search_result.get('title')}**")
-                                                st.markdown(f"Link: {search_result.get('link')}")
-                                                st.markdown(f"   {search_result.get('snippet')}")
-                                        else:
-                                            st.error(f"Search Error: {result_data.get('error')}")
-                                    else:
-                                        st.json(result_data)
-                                else:
-                                    st.write(result_data)
-                            else:
-                                st.json(step_result)
-
     
     with tab2:
-        st.markdown("### ❤️ Heart Agent Synthesis Details")
+        st.markdown("### 🛠️ Tool Execution Results")
         
-        approach = heart_result.get("synthesis_approach", {})
-        if approach:
-            st.markdown("**LLM-Determined Synthesis Strategy:**")
-            st.markdown(f"- **Approach Type:** {approach.get('approach_type', 'Unknown')}")
-            st.markdown(f"- **Tone:** {approach.get('tone', 'Professional')}")
-            
-            if approach.get("key_messages"):
-                st.markdown("**Key Messages Identified:**")
-                for msg in approach["key_messages"]:
-                    st.markdown(f"- {msg}")
-            
-            if approach.get("structure"):
-                st.markdown("**Response Structure:**")
-                for section in approach["structure"]:
-                    st.markdown(f"- {section}")
+        tool_results = result.get("tool_results", {})
+        if tool_results:
+            for tool_name, tool_result in tool_results.items():
+                with st.expander(f"🔧 {tool_name.title()} Results"):
+                    if isinstance(tool_result, dict) and 'error' not in tool_result:
+                        # Handle different tool result formats
+                        if 'results' in tool_result and isinstance(tool_result['results'], list):
+                            # Web search results
+                            st.success(f"Found {len(tool_result['results'])} results")
+                            for i, search_result in enumerate(tool_result['results'][:3]):
+                                st.markdown(f"**{i+1}. {search_result.get('title', 'No title')}**")
+                                st.markdown(f"Link: {search_result.get('link', 'No link')}")
+                                st.markdown(f"   {search_result.get('snippet', 'No snippet')}")
+                        elif 'retrieved' in tool_result:
+                            # RAG results
+                            st.success("Knowledge base retrieved")
+                            st.markdown(tool_result['retrieved'][:300] + "..." if len(tool_result['retrieved']) > 300 else tool_result['retrieved'])
+                        else:
+                            # Generic result
+                            st.json(tool_result)
+                    else:
+                        st.error(f"Tool error: {tool_result.get('error', 'Unknown error')}")
+        else:
+            st.info("No tools were used for this query")
     
     with tab3:
         st.markdown("### 🔍 Complete Raw Data")
-        st.markdown("**Full Brain Result:**")
-        st.json(brain_result)
-        st.markdown("**Full Heart Result:**")
-        st.json(heart_result)
+        st.json(result)
+
 
 
 def main():
@@ -560,7 +501,11 @@ def main():
     if 'app_initialized' not in st.session_state:
         start_background_cleanup()
         st.session_state.app_initialized = True
-
+    
+    # Initialize chat history
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+        logger.info(f"Initialized chat history for user: {get_user_id()}")
     
     # Header
     st.markdown("# 🧠❤️ Brain-Heart Deep Research System")
@@ -590,17 +535,10 @@ def main():
         available_providers = config.get_available_providers()
         st.success(f"✅ Available: {', '.join(available_providers)}")
         
-        # Brain Agent Configuration
-        st.markdown("### 🧠 Brain Agent (Orchestrator)")
-        st.caption("Analyzes queries and selects tools")
-        brain_model_config = display_model_selector(config, "Brain") 
-        
-        st.markdown("---")
-        
-        # Heart Agent Configuration
-        st.markdown("### ❤️ Heart Agent (Synthesizer)")
-        st.caption("Creates final user-focused response")
-        heart_model_config = display_model_selector(config, "Heart")
+        # Optimized Agent Configuration
+        st.markdown("### 🚀 Optimized Agent")
+        st.caption("Combined orchestration and synthesis")
+        agent_model_config = display_model_selector(config, "Agent")
 
         st.markdown("---")
 
@@ -843,35 +781,40 @@ def main():
     # Process query with REAL agents
     if submit_button and query.strip():
         # Display model information
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            st.info(f"🧠 Brain: {brain_model_config.provider}/{brain_model_config.model} (temp: 0.1)")
+            st.info(f"🚀 Agent: {agent_model_config.provider}/{agent_model_config.model}")
         with col2:
-            st.info(f"❤️ Heart: {heart_model_config.provider}/{heart_model_config.model} (temp: 0.4)")
-        with col3:
             search_type = f"Premium: {web_model_config}" if use_premium_search else "Standard: Serper/ValueSerp"
             st.info(f"🌐 Web: {search_type}")
-        
+
         # Create agents and process
         with st.spinner("Creating agents and processing query..."):
             try:
                 # Run async agent creation and processing
-                agents_result = asyncio.run(create_agents_async(config, brain_model_config, heart_model_config, web_model_config, use_premium_search))
+                agents_result = asyncio.run(create_agents_async(config, agent_model_config, web_model_config, use_premium_search))
                 
                 if agents_result["status"] == "error":
                     st.error(f"❌ Agent creation failed: {agents_result['error']}")
-                    logger.error(f"Agent creation failed: {agents_result['error']}")  # ONLY ADDITION
+                    logger.error(f"Agent creation failed: {agents_result['error']}")
                     if show_debug:
                         st.json(agents_result)
                 else:
-                    # Process query with real agents
+                    # Process query with optimized agent
                     result = asyncio.run(process_query_real(
                         query, 
-                        agents_result["brain_agent"], 
-                        agents_result["heart_agent"], 
+                        agents_result["optimized_agent"], 
                         style,
-                        user_id=get_user_id()
+                        user_id=get_user_id(),
+                        chat_history=st.session_state.chat_history
                     ))
+                    if result.get("success"):
+                        # Update chat history
+                        st.session_state.chat_history.extend([
+                            {"role": "user", "content": query},
+                            {"role": "assistant", "content": result.get("response", "")}
+                        ])
+                        logger.info(f"Updated chat history. Total messages: {len(st.session_state.chat_history)}")
                     
                     # Display real results
                     display_real_results(result, query)

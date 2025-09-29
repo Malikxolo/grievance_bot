@@ -3,13 +3,19 @@ Optimized Single-Pass Agent System
 Combines semantic analysis, tool execution, and response generation in minimal LLM calls
 """
 
+
+
 import json
 import logging
 import asyncio
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+
+
 logger = logging.getLogger(__name__)
+
+
 
 class OptimizedAgent:
     """Single-pass agent that minimizes LLM calls while maintaining all functionality"""
@@ -23,9 +29,15 @@ class OptimizedAgent:
     
     async def process_query(self, query: str, chat_history: List[Dict] = None, user_id: str = None) -> Dict[str, Any]:
         """Process query with minimal LLM calls"""
-        
         logger.info(f"🚀 PROCESSING QUERY: '{query[:50]}...'")
         start_time = datetime.now()
+        
+        logger.info(f"🔍 DEBUG CHAT HISTORY:")
+        logger.info(f"   Type: {type(chat_history)}")
+        logger.info(f"   Length: {len(chat_history) if chat_history else 0}")
+        logger.info(f"   Content: {chat_history}")
+        logger.info(f"   User ID: {user_id}")
+        logger.info(f"   Is None?: {chat_history is None}")
         
         try:
             # STEP 1: Single comprehensive analysis (combines semantic + business + planning)
@@ -35,6 +47,16 @@ class OptimizedAgent:
             analysis = await self._comprehensive_analysis(query, chat_history)
             analysis_time = (datetime.now() - analysis_start).total_seconds()
             logger.info(f"⏱️ Analysis completed in {analysis_time:.2f}s")
+            
+            # LOG: Enhanced analysis results
+            logger.info(f"📊 ANALYSIS RESULTS:")
+            logger.info(f"   Intent: {analysis.get('semantic_intent', 'Unknown')}")
+            business_opp = analysis.get('business_opportunity', {})
+            logger.info(f"   Business Confidence: {business_opp.get('composite_confidence', 0)}/100")
+            logger.info(f"   Engagement Level: {business_opp.get('engagement_level', 'none')}")
+            logger.info(f"   Signal Breakdown: {business_opp.get('signal_breakdown', {})}")
+            logger.info(f"   Tools Selected: {analysis.get('tools_to_use', [])}")
+            logger.info(f"   Response Strategy: {analysis.get('response_strategy', {}).get('personality', 'Unknown')}")
             
             # STEP 2: Execute tools if needed (no LLM calls)
             tool_start = datetime.now()
@@ -46,9 +68,26 @@ class OptimizedAgent:
             tool_time = (datetime.now() - tool_start).total_seconds()
             logger.info(f"⏱️ Tools executed in {tool_time:.2f}s")
             
+            # LOG: Tool results summary
+            if tool_results:
+                logger.info(f"🛠️ TOOL RESULTS SUMMARY:")
+                for tool_name, result in tool_results.items():
+                    if isinstance(result, dict) and result.get('success'):
+                        logger.info(f"   {tool_name}: SUCCESS - {len(str(result))} chars of data")
+                    elif isinstance(result, dict) and 'error' in result:
+                        logger.info(f"   {tool_name}: ERROR - {result.get('error', 'Unknown')}")
+                    else:
+                        logger.info(f"   {tool_name}: RESULT - {type(result)} returned")
+            else:
+                logger.info(f"🛠️ NO TOOLS EXECUTED - Conversational response only")
+            
             # STEP 3: Generate final response (single LLM call)
             response_start = datetime.now()
-            logging.info(tool_results)
+            logger.info(f"💭 PASSING TO RESPONSE GENERATOR:")
+            logger.info(f"   Analysis data: {len(str(analysis))} chars")
+            logger.info(f"   Tool data: {len(str(tool_results))} chars")
+            logger.info(f"   Strategy: {analysis.get('response_strategy', {})}")
+            
             final_response = await self._generate_response(
                 query,
                 analysis,
@@ -83,18 +122,57 @@ class OptimizedAgent:
                 "error": str(e),
                 "response": "I apologize, but I encountered an error. Please try again."
             }
-    
+    def _build_sentiment_language_guide(self, sentiment: Dict) -> str:
+        """Build sentiment-driven language guidance"""
+        emotion = sentiment.get('primary_emotion', 'casual')
+        intensity = sentiment.get('intensity', 'medium')
+        
+        guides = {
+            'frustrated': {
+                'high': "User is highly frustrated - use very empathetic, understanding language. Start with 'Arre yaar, I totally get it...'",
+                'medium': "User is frustrated - be supportive and understanding. Use 'I can see how that would be stressful...'",
+                'low': "User is mildly frustrated - be gentle and reassuring"
+            },
+            'excited': {
+                'high': "User is very excited - match their energy! Be enthusiastic and positive",
+                'medium': "User is excited - be upbeat and encouraging",
+                'low': "User is mildly excited - be positive and supportive"
+            },
+            'confused': {
+                'high': "User is very confused - be extra patient and clear. Use simple language",
+                'medium': "User is confused - be helpful and explanatory",
+                'low': "User is slightly confused - be clarifying but not condescending"
+            },
+            'urgent': {
+                'high': "User needs immediate help - be direct but supportive. Focus on solutions",
+                'medium': "User has some urgency - be helpful and action-focused",
+                'low': "User has mild urgency - be responsive and solution-oriented"
+            },
+            'casual': {
+                'high': "User is very relaxed - be friendly and conversational",
+                'medium': "User is casual - be warm and natural",
+                'low': "User is somewhat casual - be friendly but focused"
+            }
+        }
+        
+        return guides.get(emotion, {}).get(intensity, "Be naturally helpful and friendly")
+
     async def _comprehensive_analysis(self, query: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Single LLM call for ALL analysis needs"""
+        logger.info(f"🔍 ANALYSIS DEBUG:")
+        logger.info(f"   Chat History Type: {type(chat_history)}")
+        logger.info(f"   Chat History Content: {chat_history}")
+        logger.info(f"   Chat History Length: {len(chat_history) if chat_history else 0}")
         
         # Build context from chat history
-        
+        context = self._build_context(chat_history)
+        logger.info(f"   Built Context: '{context}'")
         
         # Create comprehensive prompt that does everything in one shot
-        analysis_prompt = f"""Analyze this query comprehensively and return a complete execution plan:
+        analysis_prompt = f"""Analyze this query using multi-signal intelligence and return a complete execution plan:
 
+CONVERSATION CONTEXT: {context}
 USER QUERY: {query}
-
 
 AVAILABLE TOOLS:
 - web_search: Search internet for current information
@@ -104,19 +182,46 @@ AVAILABLE TOOLS:
 Perform ALL of the following analyses in ONE response:
 
 1. SEMANTIC INTENT (what user really wants)
-2. BUSINESS OPPORTUNITY DETECTION:
-   - Is this a business pain point? (customer support, manual processes, scaling issues, etc.)
-   - Score 0-100 (0=no opportunity, 100=strong opportunity)
-   - Only mark as opportunity if it's BUSINESS-RELATED, not personal
+   - What is the user actually asking for?
+   - Does this need current/live information that changes over time?
+   - What's their emotional state and communication style?
+
+2. MULTI-SIGNAL BUSINESS OPPORTUNITY ANALYSIS:
+   Evaluate these independent signals (0-100 confidence each):
+   
+   Work Context Signals: Professional language, business terms, operational references, customer/client mentions, process discussions, workplace scenarios
+   
+   Emotional Distress Signals: Frustration, overwhelm, stress expressions, pain points, struggling language, difficulty expressions
+   
+   Solution-Seeking Signals: Help-seeking language, problem-focused communication, "how to" questions, improvement-oriented requests
+   
+   Scale/Scope Signals: Business-level problems vs personal issues, volume indicators, operational scale mentions
+   
+   Calculate composite confidence as weighted average of these signals.
+   Determine engagement strategy:
+   - 80-100: Direct business consultation mode
+   - 60-79: Gentle business suggestion mode  
+   - 40-59: Empathetic probing mode
+   - 0-39: Pure empathy only mode
+
 3. TOOL SELECTION:
    - What tools are needed? (can be multiple or none)
-   - Use web_search for: current info, news, market data, trends
-   - Use rag for: "my product/company/documents" or uploaded files
-   - Use calculator for: math, percentages, financial metrics
+   - STEP-BY-STEP TOOL SELECTION:
+        1. What information is needed to answer this query?
+        2. Where can that information come from?
+        3. What processing/analysis is required?
+        4. Select appropriate tools based on these needs
    - Use NO tools for: greetings, thanks, casual chat
+   - USE MULTIPLE TOOLS WHEN HELPFUL:
+    - Market comparisons → ["web_search", "calculator"]
+    - "My product vs competitor" → ["web_search", "rag", "calculator"]  
+    - Financial analysis → ["web_search", "calculator"]
+    - Document + market research → ["rag", "web_search"]
+
 4. SENTIMENT & PERSONALITY:
    - User's emotional state (frustrated/excited/casual/urgent/confused)
    - Best response personality (empathetic_friend/excited_buddy/helpful_dost/urgent_solver/patient_guide)
+
 5. RESPONSE STRATEGY:
    - Response length (micro/short/medium/detailed)
    - Language style (hinglish/english/professional/casual)
@@ -126,10 +231,17 @@ Return ONLY valid JSON:
     "semantic_intent": "clear description of what user wants",
     "business_opportunity": {{
         "detected": true/false,
-        "score": 0-100,
+        "composite_confidence": 0-100,
+        "engagement_level": "direct_consultation|gentle_suggestion|empathetic_probing|pure_empathy",
+        "signal_breakdown": {{
+            "work_context": 0-100,
+            "emotional_distress": 0-100,
+            "solution_seeking": 0-100,
+            "scale_scope": 0-100
+        }},
         "pain_points": ["specific problems"],
         "solution_areas": ["how we can help"],
-        "sales_mode": "none|casual|soft_pitch|consultative"
+        "recommended_approach": "empathy_first|solution_focused|consultation_ready"
     }},
     "tools_to_use": ["tool1", "tool2"],
     "tool_reasoning": "why these tools",
@@ -147,23 +259,41 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            messages = chat_history
+            messages = chat_history if chat_history else []
             messages.append({"role": "user", "content": analysis_prompt})
             with open("debug_request_payload.json", "w") as f:
                 json.dumps(messages)
+            
+            logger.info(f"🧠 CALLING BRAIN LLM for analysis...")
             response = await self.brain_llm.generate(
                 messages,
                 temperature=0.1,
-                system_prompt="You are an expert analyst. Analyze queries comprehensively covering semantics, business opportunities, tool needs, and communication strategy. Return valid JSON only."
+                system_prompt="You are an expert analyst. Analyze queries using multi-signal intelligence covering semantics, business opportunities, tool needs, and communication strategy. Return valid JSON only."
             )
+            
+            # LOG: Raw LLM response
+            logger.info(f"🧠 BRAIN LLM RAW RESPONSE: {len(response)} chars")
+            logger.info(f"🧠 First 200 chars: {response[:200]}...")
             
             # Clean response
             cleaned = self._clean_json_response(response)
+            logger.info(f"🧠 CLEANED RESPONSE: {len(cleaned)} chars")
+            
             analysis = json.loads(cleaned)
             
+            # LOG: Parsed analysis details
             logger.info(f"✅ Analysis complete: intent={analysis.get('semantic_intent')}, "
                        f"business={analysis.get('business_opportunity', {}).get('detected')}, "
+                       f"confidence={analysis.get('business_opportunity', {}).get('composite_confidence', 0)}, "
                        f"tools={analysis.get('tools_to_use', [])}")
+            
+            logger.info(f"🧠 FULL ANALYSIS GENERATED:")
+            logger.info(f"   Semantic Intent: {analysis.get('semantic_intent', 'Unknown')}")
+            logger.info(f"   Business Opportunity: {analysis.get('business_opportunity', {})}")
+            logger.info(f"   Tools to Use: {analysis.get('tools_to_use', [])}")
+            logger.info(f"   Tool Reasoning: {analysis.get('tool_reasoning', 'None')}")
+            logger.info(f"   Sentiment: {analysis.get('sentiment', {})}")
+            logger.info(f"   Response Strategy: {analysis.get('response_strategy', {})}")
             
             return analysis
             
@@ -172,7 +302,18 @@ Return ONLY valid JSON:
             # Return safe defaults
             return {
                 "semantic_intent": "general_inquiry",
-                "business_opportunity": {"detected": False, "score": 0},
+                "business_opportunity": {
+                    "detected": False, 
+                    "composite_confidence": 0,
+                    "engagement_level": "pure_empathy",
+                    "signal_breakdown": {
+                        "work_context": 0,
+                        "emotional_distress": 0,
+                        "solution_seeking": 0,
+                        "scale_scope": 0
+                    },
+                    "recommended_approach": "empathy_first"
+                },
                 "tools_to_use": [],
                 "sentiment": {"primary_emotion": "casual", "intensity": "medium"},
                 "response_strategy": {
@@ -212,7 +353,7 @@ Return ONLY valid JSON:
         return results
     
     async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, chat_history: List[Dict]) -> str:
-        """Single LLM call to generate final response"""
+        """Generate response with simple business mode switching like old system"""
         
         # Extract key elements
         intent = analysis.get('semantic_intent', '')
@@ -220,47 +361,66 @@ Return ONLY valid JSON:
         sentiment = analysis.get('sentiment', {})
         strategy = analysis.get('response_strategy', {})
         
+        # Simple binary business mode logic (like your old system)
+        business_detected = business_opp.get('detected', False)
+        conversation_mode = "Smart Business Friend" if business_detected else "Casual Dost"
+        
+        # Actually USE the sentiment guide you built
+        sentiment_guidance = self._build_sentiment_language_guide(sentiment)
+        
+        # Enhanced logging
+        logger.info(f"❤️ RESPONSE GENERATION INPUTS:")
+        logger.info(f"   Intent: {intent}")
+        logger.info(f"   Business Opportunity Detected: {business_detected}")
+        logger.info(f"   Conversation Mode: {conversation_mode}")
+        logger.info(f"   User Emotion: {sentiment.get('primary_emotion', 'casual')}")
+        logger.info(f"   Sentiment Guidance: {sentiment_guidance}")
+        logger.info(f"   Response Personality: {strategy.get('personality', 'helpful_dost')}")
+        logger.info(f"   Response Length: {strategy.get('length', 'medium')}")
+        logger.info(f"   Language Style: {strategy.get('language', 'hinglish')}")
+        
         # Format tool results
         tool_data = self._format_tool_results(tool_results)
-        
+        logger.info(f"❤️ FORMATTED TOOL DATA: {len(tool_data)} chars")
         
         # Build memory context to avoid repetition
         recent_phrases = self._extract_recent_phrases(chat_history)
+        logger.info(f"❤️ RECENT PHRASES TO AVOID: {recent_phrases}")
         
-        response_prompt = f"""Generate a natural response based on this analysis:
+        # Simple, clean prompt (like your old system)
+        response_prompt = f"""You are Mochand Dost - a naturally helpful AI friend who becomes a smart business consultant when needed.
 
-USER QUERY: {query}
-INTENT: {intent}
-KEY POINTS TO ADDRESS: {analysis.get('key_points_to_address', [])}
+    CURRENT CONVERSATION CONTEXT:
+    - User Intent: {intent}
+    - Business Opportunity Detected: {business_detected}
+    - Conversation Mode: {conversation_mode}
+    - User Sentiment Guide: {sentiment_guidance}
+    - Pain Points: {business_opp.get('pain_points', [])}
+    - Solution Areas: {business_opp.get('solution_areas', [])}
 
-AVAILABLE DATA FROM TOOLS:
-{tool_data}
+    AVAILABLE DATA TO USE NATURALLY:
+    {tool_data}
 
-BUSINESS CONTEXT:
-- Opportunity Detected: {business_opp.get('detected', False)}
-- Score: {business_opp.get('score', 0)}/100
-- Pain Points: {business_opp.get('pain_points', [])}
-- Sales Mode: {business_opp.get('sales_mode', 'none')}
+    CONVERSATION MEMORY - Don't repeat these recent patterns:
+    {recent_phrases}
 
-RESPONSE REQUIREMENTS:
-- Personality: {strategy.get('personality', 'helpful_dost')}
-- Length: {strategy.get('length', 'medium')} 
-- Language: {strategy.get('language', 'hinglish')}
-- Tone: {strategy.get('tone', 'friendly')}
-- User Emotion: {sentiment.get('primary_emotion', 'casual')} ({sentiment.get('intensity', 'medium')})
+    RESPONSE REQUIREMENTS:
+    - Personality: {strategy.get('personality', 'helpful_dost')}
+    - Length: {strategy.get('length', 'medium')} 
+    - Language: {strategy.get('language', 'hinglish')}
+    - Tone: {strategy.get('tone', 'friendly')}
 
-AVOID THESE RECENT PHRASES: {recent_phrases}
+    RESPONSE GENERATION RULES:
+    1. NEVER restate or echo what the user just said
+    2. NEVER announce tool usage ("Let me search...", "I found this data...")  
+    3. Use the sentiment guide to match their emotional state perfectly
+    4. If business opportunity detected, weave in soft business solutions naturally as a caring friend
+    5. Stay in character as their helpful dost friend throughout
+    6. End with engaging question to continue conversation naturally
 
-CRITICAL RULES:
-1. Use tool data naturally without announcing "I found" or "Let me search"
-2. Never repeat user's words back to them
-3. If business opportunity detected with score > 60, weave in soft sales naturally
-4. Match user's emotional state with appropriate empathy
-5. End with engaging question if appropriate
-6. For jokes/fun requests, be creative and entertaining
-7. For technical queries, be precise and helpful
+    USER QUERY: {query}
 
-Generate a response that feels natural, helpful, and conversational."""
+    Respond naturally as Mochand Dost in {conversation_mode} mode."""
 
         try:
             # Determine max tokens based on length strategy
@@ -270,7 +430,11 @@ Generate a response that feels natural, helpful, and conversational."""
                 "medium": 500,
                 "detailed": 700
             }.get(strategy.get('length', 'medium'), 500)
-            messages = chat_history
+            
+            logger.info(f"❤️ CALLING HEART LLM for response generation...")
+            logger.info(f"❤️ Max tokens: {max_tokens}, Temperature: 0.4")
+            
+            messages = chat_history if chat_history else []
             messages.append({"role": "user", "content": response_prompt})
             with open("debug_response_prompt.json", "w") as f:
                 f.write(json.dumps(messages))
@@ -278,12 +442,17 @@ Generate a response that feels natural, helpful, and conversational."""
                 messages,
                 temperature=0.4,
                 max_tokens=1000,
-                system_prompt="You are Mochand Dost - a naturally helpful AI friend who becomes a smart sales consultant when needed. Create responses that are engaging, helpful, and conversational. Try to generate informative but completed answers in one go under 1000 characters."
+                system_prompt="You are Mochand Dost - a naturally helpful AI friend who becomes a smart sales consultant when business opportunities are detected. Always start with empathy and maintain the warm dost personality."
             )
             
+            # LOG: Raw response from Heart LLM
+            logger.info(f"❤️ HEART LLM RAW RESPONSE: {len(response)} chars")
+            logger.info(f"❤️ First 200 chars: {response[:200]}...")
             
             # Clean and format
             response = self._clean_response(response)
+            logger.info(f"❤️ FINAL CLEANED RESPONSE: {len(response)} chars")
+            logger.info(f"❤️ FINAL RESPONSE: {response}")
             
             logger.info(f"✅ Response generated: {len(response)} chars")
             return response
@@ -354,7 +523,6 @@ Generate a response that feels natural, helpful, and conversational."""
         
         return "\n\n".join(formatted) if formatted else "No usable tool data"
 
-    
     def _extract_recent_phrases(self, chat_history: List[Dict]) -> List[str]:
         """Extract recent phrases to avoid repetition"""
         if not chat_history:
@@ -399,67 +567,7 @@ Generate a response that feels natural, helpful, and conversational."""
         response = self._clean_json_response(response)
         
         # Fix formatting for display
-        response = response.replace('•', '-')
+        response = response.replace('- ', '-')
         response = response.strip()
         
         return response
-
-
-class StreamlitOptimizedApp:
-    """Streamlit integration for optimized agent"""
-    
-    def __init__(self, llm_client, tool_manager):
-        self.agent = OptimizedAgent(llm_client, tool_manager)
-        logger.info("StreamlitOptimizedApp initialized")
-    
-    async def process_message(self, message: str, chat_history: List[Dict], user_id: str = None) -> Dict[str, Any]:
-        """Process message with optimized agent"""
-        
-        logger.info(f"📨 Processing message: '{message[:50]}...'")
-        
-        # Process with optimized agent
-        result = await self.agent.process_query(message, chat_history, user_id)
-        
-        # Log performance metrics
-        if result.get('success') and 'processing_time' in result:
-            times = result['processing_time']
-            logger.info(f"⚡ Performance Metrics:")
-            logger.info(f"   Analysis: {times['analysis']:.2f}s")
-            logger.info(f"   Tools: {times['tools']:.2f}s")
-            logger.info(f"   Response: {times['response']:.2f}s")
-            logger.info(f"   TOTAL: {times['total']:.2f}s")
-            
-            # Alert if too slow
-            if times['total'] > 3.0:
-                logger.warning(f"⚠️ Slow response detected: {times['total']:.2f}s")
-        
-        return result
-
-
-# Example integration
-async def main():
-    """Example usage"""
-    from your_llm_client import LLMClient  # Your existing LLM client
-    from your_tool_manager import ToolManager  # Your existing tool manager
-    
-    # Initialize
-    llm_client = LLMClient(api_key="your_key")
-    tool_manager = ToolManager()
-    
-    # Create optimized app
-    app = StreamlitOptimizedApp(llm_client, tool_manager)
-    
-    # Process message
-    result = await app.process_message(
-        "I'm struggling with customer support",
-        chat_history=[],
-        user_id="user123"
-    )
-    
-    print(f"Response: {result['response']}")
-    print(f"Business Opportunity: {result.get('business_opportunity', {}).get('detected')}")
-    print(f"Processing Time: {result.get('processing_time', {}).get('total')}s")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
