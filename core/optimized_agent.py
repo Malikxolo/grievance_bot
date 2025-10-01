@@ -63,6 +63,7 @@ class OptimizedAgent:
             tool_results = await self._execute_tools(
                 analysis.get('tools_to_use', []),
                 query,
+                analysis,
                 user_id
             )
             tool_time = (datetime.now() - tool_start).total_seconds()
@@ -129,8 +130,8 @@ class OptimizedAgent:
         
         guides = {
             'frustrated': {
-                'high': "User is highly frustrated - use very empathetic, understanding language. Start with 'Arre yaar, I totally get it...'",
-                'medium': "User is frustrated - be supportive and understanding. Use 'I can see how that would be stressful...'",
+                'high': "User is highly frustrated - use very empathetic, understanding language. Be supportive and understanding",  # Remove Hindi,
+                'medium': "User is frustrated - be supportive and understanding",
                 'low': "User is mildly frustrated - be gentle and reassuring"
             },
             'excited': {
@@ -226,6 +227,21 @@ Perform ALL of the following analyses in ONE response:
    - Response length (micro/short/medium/detailed)
    - Language style (hinglish/english/professional/casual)
 
+6. TOOL QUERY OPTIMIZATION:
+   For each selected tool, create an optimized version of the user query:
+   
+   web_search: Convert conversational language to search terms
+   - Remove "can you", "tell me", "I want to know" 
+   - Add context from conversation if relevant
+   - Include time-sensitive terms when needed (today, current, latest, 2025)
+   
+   rag: Extract key concepts and focus terms
+   - Main topics and entities from the query
+   - Context terms from conversation
+   
+   calculator: Format as clear mathematical expression
+   - Extract numbers and operations clearly
+
 Return ONLY valid JSON:
 {{
     "semantic_intent": "clear description of what user wants",
@@ -244,6 +260,11 @@ Return ONLY valid JSON:
         "recommended_approach": "empathy_first|solution_focused|consultation_ready"
     }},
     "tools_to_use": ["tool1", "tool2"],
+    "enhanced_queries": {{
+        "web_search": "optimized search query",
+        "rag": "optimized rag query",
+        "calculator": "clear calculation"
+    }},
     "tool_reasoning": "why these tools",
     "sentiment": {{
         "primary_emotion": "frustrated|excited|casual|urgent|confused",
@@ -294,7 +315,7 @@ Return ONLY valid JSON:
             logger.info(f"   Tool Reasoning: {analysis.get('tool_reasoning', 'None')}")
             logger.info(f"   Sentiment: {analysis.get('sentiment', {})}")
             logger.info(f"   Response Strategy: {analysis.get('response_strategy', {})}")
-            
+            logger.info(f"   Enhanced Queries: {analysis.get('enhanced_queries', {})}")
             return analysis
             
         except Exception as e:
@@ -315,6 +336,7 @@ Return ONLY valid JSON:
                     "recommended_approach": "empathy_first"
                 },
                 "tools_to_use": [],
+                "enhanced_queries": {},
                 "sentiment": {"primary_emotion": "casual", "intensity": "medium"},
                 "response_strategy": {
                     "personality": "helpful_dost",
@@ -324,19 +346,24 @@ Return ONLY valid JSON:
                 }
             }
     
-    async def _execute_tools(self, tools: List[str], query: str, user_id: str = None) -> Dict[str, Any]:
-        """Execute tools in parallel for speed"""
+    async def _execute_tools(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
+        """Execute tools with enhanced queries"""
         
         if not tools:
             return {}
         
         results = {}
+        enhanced_queries = analysis.get('enhanced_queries', {})
         
         # Execute tools in parallel for speed
         tasks = []
         for tool in tools:
             if tool in self.available_tools:
-                task = self.tool_manager.execute_tool(tool, query=query, user_id=user_id)
+                # Use enhanced query if available, fallback to raw query
+                tool_query = enhanced_queries.get(tool, query)
+                logger.info(f"🔧 {tool.upper()} ENHANCED QUERY: '{tool_query}'")
+                
+                task = self.tool_manager.execute_tool(tool, query=tool_query, user_id=user_id)
                 tasks.append((tool, task))
         
         if tasks:
@@ -351,6 +378,7 @@ Return ONLY valid JSON:
                     results[tool_name] = {"error": str(e)}
         
         return results
+
     
     async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, chat_history: List[Dict]) -> str:
         """Generate response with simple business mode switching like old system"""
@@ -442,7 +470,7 @@ Return ONLY valid JSON:
                 messages,
                 temperature=0.4,
                 max_tokens=1000,
-                system_prompt="You are Mochand Dost - a naturally helpful AI friend who becomes a smart sales consultant when business opportunities are detected. Always start with empathy and maintain the warm dost personality."
+                system_prompt="You are Mochand Dost, a conversational AI assistant. Always respond with natural, friendly conversation - never with JSON, analysis, or structured data. Be warm and helpful."
             )
             
             # LOG: Raw response from Heart LLM
