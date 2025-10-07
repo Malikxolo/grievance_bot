@@ -57,12 +57,13 @@ class CalculatorTool(BaseTool):
             "Perform mathematical calculations and statistical operations"
         )
     
-    async def execute(self, expression: str = None, operation: str = None, 
-                     numbers: List[float] = None, **kwargs) -> Dict[str, Any]:
+    async def execute(self, query: str = None, expression: str = None, 
+                    operation: str = None, numbers: List[float] = None, **kwargs) -> Dict[str, Any]:
         """Execute mathematical operations"""
         
         self._record_usage()
-        
+        if query and not expression:
+            expression = query
         try:
             if expression:
                 return await self._evaluate_expression(expression)

@@ -1,6 +1,7 @@
 """
 Optimized Single-Pass Agent System
 Combines semantic analysis, tool execution, and response generation in minimal LLM calls
+Now supports sequential tool execution with middleware for dependent tools
 """
 
 import json
@@ -34,7 +35,7 @@ class OptimizedAgent:
         logger.info(f"   Is None?: {chat_history is None}")
         
         try:
-            # STEP 1: Single comprehensive analysis (combines semantic + business + planning)
+            # STEP 1: Single comprehensive analysis (combines semantic + business + planning + dependency detection)
             analysis_start = datetime.now()
             with open("debug_analysis_prompt.json", "w") as f:
                 f.write(json.dumps(chat_history))
@@ -52,7 +53,15 @@ class OptimizedAgent:
             logger.info(f"   Tools Selected: {analysis.get('tools_to_use', [])}")
             logger.info(f"   Response Strategy: {analysis.get('response_strategy', {}).get('personality', 'Unknown')}")
             
-            # STEP 2: Execute tools if needed (no LLM calls)
+            # LOG: Tool execution mode
+            tool_execution = analysis.get('tool_execution', {})
+            execution_mode = tool_execution.get('mode', 'parallel')
+            logger.info(f"   Execution Mode: {execution_mode}")
+            if execution_mode == 'sequential':
+                logger.info(f"   Execution Order: {tool_execution.get('order', [])}")
+                logger.info(f"   Dependency Reason: {tool_execution.get('dependency_reason', 'N/A')}")
+            
+            # STEP 2: Execute tools if needed (may include middleware LLM call for sequential)
             tool_start = datetime.now()
             tool_results = await self._execute_tools(
                 analysis.get('tools_to_use', []),
@@ -91,7 +100,13 @@ class OptimizedAgent:
             logger.info(f"⏱️ Response generated in {response_time:.2f}s")
             
             total_time = (datetime.now() - start_time).total_seconds()
-            logger.info(f"✅ TOTAL PROCESSING TIME: {total_time:.2f}s (2 LLM calls only)")
+            
+            # Count actual LLM calls
+            llm_calls = 2  # Brain + Heart
+            if execution_mode == 'sequential':
+                llm_calls += 1  # Middleware
+            
+            logger.info(f"✅ TOTAL PROCESSING TIME: {total_time:.2f}s ({llm_calls} LLM calls)")
             
             return {
                 "success": True,
@@ -99,6 +114,7 @@ class OptimizedAgent:
                 "analysis": analysis,
                 "tool_results": tool_results,
                 "tools_used": analysis.get('tools_to_use', []),
+                "execution_mode": execution_mode,
                 "business_opportunity": analysis.get('business_opportunity', {}),
                 "processing_time": {
                     "analysis": analysis_time,
@@ -162,7 +178,7 @@ class OptimizedAgent:
         context = self._build_context(chat_history)
         logger.info(f"   Built Context: '{context}'")
         
-        # ⚠️ MODIFIED: Updated Section 3 and Section 6 in prompt
+        # Create comprehensive prompt that does everything in one shot
         analysis_prompt = f"""Analyze this query using multi-signal intelligence and return a complete execution plan:
 
 CONVERSATION CONTEXT: {context}
@@ -218,41 +234,14 @@ Perform ALL of the following analyses in ONE response:
         2. Where can that information come from?
         3. What processing/analysis is required?
         4. Select appropriate tools based on these needs
-   
    - Use NO tools for: 
      * Greetings, thanks, casual chat
      * General knowledge questions (e.g., "Python vs JavaScript", "How to code", "What is AI")
-   
    - USE MULTIPLE TOOLS WHEN HELPFUL:
     - Market comparisons → ["web_search", "calculator"]
     - "My product vs competitor" → ["web_search", "rag", "calculator"]  
     - Financial analysis → ["web_search", "calculator"]
     - Document + market research → ["rag", "web_search"]
-   
-   CRITICAL: TOOL NAMING RULES
-   
-   IF you need ONLY ONE instance of a tool:
-   → Use base name: "web_search", "calculator", "rag"
-   → Example: ["web_search", "rag"]
-   
-   IF you need MULTIPLE instances of the SAME tool:
-   → Use indexed names starting from 0: "tool_0", "tool_1", "tool_2"
-   → Example: ["web_search_0", "web_search_1"]
-   → NEVER mix: ❌ ["web_search", "web_search_0"]
-   
-   Decision tree:
-   - Need 1 web search? → "web_search"
-   - Need 2+ web searches? → "web_search_0", "web_search_1", "web_search_2"
-   - Need 1 calculation? → "calculator"
-   - Need 2+ calculations? → "calculator_0", "calculator_1"
-   - RAG is always singular → "rag" (only one knowledge base)
-   
-   Examples:
-   - "Tesla stock price" → ["web_search"]
-   - "Tesla and Apple stock prices" → ["web_search_0", "web_search_1"]
-   - "Compare Zendesk vs Intercom" → ["web_search_0", "web_search_1"]
-   - "Calculate 10*5 and 20*3" → ["calculator_0", "calculator_1"]
-
 
 4. SENTIMENT & PERSONALITY:
    - User's emotional state (frustrated/excited/casual/urgent/confused)
@@ -262,67 +251,83 @@ Perform ALL of the following analyses in ONE response:
    - Response length (micro/short/medium/detailed)
    - Language style (hinglish/english/professional/casual)
 
-6. TOOL QUERY OPTIMIZATION:
-   
-   Step 1: Resolve References
-   - If query has pronouns ("that", "those", "them", "it", "which"):
-     * Look at CONVERSATION CONTEXT above
-     * Replace pronoun with actual entity name
-   
-   Step 2: Classify Query Type
-   - Mochand comparison (Mochand vs X) → search X only, exclude Mochand
-   - General comparison (X vs Y, both known) → search separately
-   - Follow-up (resolved from context) → use resolved entities
-   - Fresh query → extract from user's words
-   
-   Step 3: Build Query
-   
-   CRITICAL: enhanced_queries keys must EXACTLY match tools_to_use
-   
-   If tools_to_use = ["web_search"]:
-   {{
-       "web_search": "optimized query"
-   }}
-   
-   If tools_to_use = ["web_search_0", "web_search_1"]:
-   {{
-       "web_search_0": "first specific query",
-       "web_search_1": "second specific query"
-   }}
-   
-   Examples:
-   
-   Single search:
-   Query: "Tesla stock price"
-   Tools: ["web_search"]
-   {{
-       "web_search": "Tesla stock price today 2025"
-   }}
-   
-   Multiple searches:
-   Query: "Tesla and Apple stock prices"
-   Tools: ["web_search_0", "web_search_1"]
-   {{
-       "web_search_0": "Tesla stock price today 2025",
-       "web_search_1": "Apple stock price today 2025"
-   }}
-   
-   Query: "Compare Zendesk and Intercom"
-   Tools: ["web_search_0", "web_search_1"]
-   {{
-       "web_search_0": "Zendesk pricing features 2025",
-       "web_search_1": "Intercom pricing features 2025"
-   }}
-   
-   WEB_SEARCH rules (apply to each):
-   - NEVER include "Mochand" in web queries
-   - Add "2025" for time-sensitive topics
-   - Format: [entity] + [specific need] + [year if relevant]
-   
-   RAG: "Mochand" + [topic]
-   CALCULATOR: [math expression]
+6. DEPENDENCY & QUERY OPTIMIZATION:
 
-      
+    Step 1: If 2+ tools selected, detect dependencies
+    - Does any tool need output from another tool to work?
+    - If YES: mode="sequential", order=[first_tool, second_tool, third_tool, ...]
+    - If NO: mode="parallel"
+
+    Step 2: Generate queries based on POSITION in order array
+
+    CRITICAL RULE FOR SEQUENTIAL MODE:
+    → ONLY order[0] (first tool) gets a real query
+    → ALL other tools (order[1], order[2], etc.) get "WAIT_FOR_PREVIOUS"
+    → Do NOT generate real queries for any tool after the first one
+
+    For tools that need real queries (first tool OR parallel mode):
+    Query format rules:
+    - RAG: "Mochand" + [topic from query]
+    - web_search: [industry terms, NO "Mochand"] + "2025" if time-sensitive
+    - calculator: [valid math expression like "50 * 20"]
+    - Resolve pronouns ("our"/"my"/"it") from CONVERSATION CONTEXT first
+
+    For tools that are waiting (order[1], order[2], etc. in sequential):
+    - Set query to exactly: "WAIT_FOR_PREVIOUS"
+    - Middleware will generate context-aware queries after previous tool completes
+
+    Examples showing position-based logic:
+
+    Example 1 - Sequential with 2 tools:
+    Query: "compare our product with competitors"
+    Analysis: web_search needs product info from rag → dependent
+    Output:
+    {{
+    "mode": "sequential",
+    "order": ["rag", "web_search"],
+    "enhanced_queries": {{
+        "rag": "Mochand features pricing",        ← Position 0: real query
+        "web_search": "WAIT_FOR_PREVIOUS"         ← Position 1: wait
+    }}
+    }}
+
+    Example 2 - Sequential with 3 tools:
+    Query: "compare our product pricing to competitors and calculate difference"
+    Analysis: All tools dependent in chain → sequential
+    Output:
+    {{
+    "mode": "sequential",
+    "order": ["rag", "web_search", "calculator"],
+    "enhanced_queries": {{
+        "rag": "Mochand pricing",                 ← Position 0: real query
+        "web_search": "WAIT_FOR_PREVIOUS",        ← Position 1: wait
+        "calculator": "WAIT_FOR_PREVIOUS"         ← Position 2: wait
+    }}
+    }}
+
+    Example 3 - Parallel (completely independent):
+    Query: "calculate 50 times 20"
+    Analysis: Calculator has ALL numbers from query, no other tool needed → independent
+    Output:
+    {{
+    "mode": "parallel",
+    "enhanced_queries": {{
+        "calculator": "50 * 20"
+    }}
+    }}
+
+    Example 4 - Single tool (always parallel):
+    Query: "what is my product?"
+    Output:
+    {{
+    "mode": "parallel",
+    "enhanced_queries": {{
+        "rag": "Mochand product information"
+    }}
+    }}
+
+
+
 Return ONLY valid JSON:
 {{
     "semantic_intent": "clear description of what user wants",
@@ -341,10 +346,15 @@ Return ONLY valid JSON:
         "recommended_approach": "empathy_first|solution_focused|consultation_ready"
     }},
     "tools_to_use": ["tool1", "tool2"],
+    "tool_execution": {{
+        "mode": "sequential|parallel",
+        "order": ["tool1", "tool2"],
+        "dependency_reason": "why sequential is needed"
+    }},
     "enhanced_queries": {{
-        // Keys here must EXACTLY match tools_to_use
-        // Single tools: "web_search", "rag", "calculator"
-        // Multiple instances: "web_search_0", "web_search_1", etc.
+        "web_search": "optimized search query or WAIT_FOR_PREVIOUS",
+        "rag": "optimized rag query",
+        "calculator": "clear calculation"
     }},
     "tool_reasoning": "why these tools",
     "sentiment": {{
@@ -383,6 +393,14 @@ Return ONLY valid JSON:
             
             analysis = json.loads(cleaned)
             
+            # Ensure tool_execution exists with defaults
+            if 'tool_execution' not in analysis:
+                analysis['tool_execution'] = {
+                    'mode': 'parallel',
+                    'order': [],
+                    'dependency_reason': ''
+                }
+            
             # LOG: Parsed analysis details
             logger.info(f"✅ Analysis complete: intent={analysis.get('semantic_intent')}, "
                        f"business={analysis.get('business_opportunity', {}).get('detected')}, "
@@ -397,6 +415,7 @@ Return ONLY valid JSON:
             logger.info(f"   Sentiment: {analysis.get('sentiment', {})}")
             logger.info(f"   Response Strategy: {analysis.get('response_strategy', {})}")
             logger.info(f"   Enhanced Queries: {analysis.get('enhanced_queries', {})}")
+            logger.info(f"   Tool Execution: {analysis.get('tool_execution', {})}")
             return analysis
             
         except Exception as e:
@@ -417,6 +436,11 @@ Return ONLY valid JSON:
                     "recommended_approach": "empathy_first"
                 },
                 "tools_to_use": [],
+                "tool_execution": {
+                    "mode": "parallel",
+                    "order": [],
+                    "dependency_reason": ""
+                },
                 "enhanced_queries": {},
                 "sentiment": {"primary_emotion": "casual", "intensity": "medium"},
                 "response_strategy": {
@@ -427,41 +451,46 @@ Return ONLY valid JSON:
                 }
             }
     
-    # ⚠️ MODIFIED: Updated to handle indexed tool names
     async def _execute_tools(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
-        """Execute tools with enhanced queries, handling indexed tool names (web_search_0, web_search_1, etc.)"""
+        """Execute tools with smart parallel/sequential handling based on dependencies"""
         
         if not tools:
             return {}
         
+        # Check execution mode from analysis
+        tool_execution = analysis.get('tool_execution', {})
+        execution_mode = tool_execution.get('mode', 'parallel')
+        
+        # Route to appropriate execution method
+        if execution_mode == 'sequential' and len(tools) > 1:
+            logger.info(f"🔧 SEQUENTIAL EXECUTION MODE")
+            return await self._execute_sequential(tools, query, analysis, user_id)
+        else:
+            logger.info(f"🔧 PARALLEL EXECUTION MODE")
+            return await self._execute_parallel(tools, query, analysis, user_id)
+    
+    async def _execute_parallel(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
+        """Execute tools in parallel (original behavior)"""
         results = {}
         enhanced_queries = analysis.get('enhanced_queries', {})
-        
-        logger.info(f"🔧 EXECUTING TOOLS: {tools}")
         
         # Execute tools in parallel for speed
         tasks = []
         for tool in tools:
-            # Extract base tool name (web_search_0 → web_search)
-            base_tool = self._get_base_tool_name(tool)
-            
-            if base_tool in self.available_tools:
+            if tool in self.available_tools:
                 # Use enhanced query if available, fallback to raw query
                 tool_query = enhanced_queries.get(tool, query)
-                logger.info(f"🔧 {tool.upper()} (base: {base_tool}) ENHANCED QUERY: '{tool_query}'")
+                logger.info(f"🔧 {tool.upper()} ENHANCED QUERY: '{tool_query}'")
                 
-                # Execute with base tool name, but store with indexed name
-                task = self.tool_manager.execute_tool(base_tool, query=tool_query, user_id=user_id)
-                tasks.append((tool, task))  # Keep indexed name for results
-            else:
-                logger.warning(f"⚠️ Base tool {base_tool} not available, skipping {tool}")
+                task = self.tool_manager.execute_tool(tool, query=tool_query, user_id=user_id)
+                tasks.append((tool, task))
         
         if tasks:
             # Gather all results in parallel
             for tool_name, task in tasks:
                 try:
                     result = await task
-                    results[tool_name] = result  # Store with indexed name
+                    results[tool_name] = result
                     logger.info(f"✅ Tool {tool_name} executed successfully")
                 except Exception as e:
                     logger.error(f"❌ Tool {tool_name} failed: {e}")
@@ -469,16 +498,138 @@ Return ONLY valid JSON:
         
         return results
     
-    # ⭐ NEW METHOD: Extract base tool name from indexed tools
-    def _get_base_tool_name(self, tool: str) -> str:
-        """Extract base tool name from indexed tool (web_search_0 → web_search)"""
-        # Check if tool has index suffix (tool_0, tool_1, etc.)
-        if '_' in tool:
-            parts = tool.rsplit('_', 1)
-            if len(parts) == 2 and parts[1].isdigit():
-                return parts[0]  # Return base name (web_search, calculator, etc.)
-        return tool  # Return as-is if no index (rag, web_search without index)
+    async def _execute_sequential(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
+        """Execute tools sequentially with middleware for dependent queries"""
+        results = {}
+        enhanced_queries = analysis.get('enhanced_queries', {})
+        tool_execution = analysis.get('tool_execution', {})
+        order = tool_execution.get('order', tools)
+        
+        logger.info(f"   Execution order: {order}")
+        logger.info(f"   Reason: {tool_execution.get('dependency_reason', 'N/A')}")
+        
+        # Execute first tool
+        first_tool = order[0]
+        first_query = enhanced_queries.get(first_tool, query)
+        logger.info(f"   → Step 1: Executing {first_tool.upper()} with query: '{first_query}'")
+        
+        try:
+            results[first_tool] = await self.tool_manager.execute_tool(first_tool, query=first_query, user_id=user_id)
+            logger.info(f"   ✅ {first_tool} completed")
+        except Exception as e:
+            logger.error(f"   ❌ {first_tool} failed: {e}")
+            results[first_tool] = {"error": str(e)}
+            # Return early if first tool fails
+            return results
+        
+        # Execute remaining tools with middleware
+        for i in range(1, len(order)):
+            current_tool = order[i]
+            
+            # Check if this tool needs middleware
+            if enhanced_queries.get(current_tool) == "WAIT_FOR_PREVIOUS":
+                logger.info(f"   → Step 2: Middleware generating enhanced query for {current_tool}...")
+                
+                # Use middleware to generate enhanced query from previous results
+                enhanced_query = await self._middleware_summarizer(
+                    previous_results=results,
+                    original_query=query,
+                    next_tool=current_tool
+                )
+                logger.info(f"   → Middleware output: '{enhanced_query}'")
+            else:
+                enhanced_query = enhanced_queries.get(current_tool, query)
+            
+            # Execute current tool
+            logger.info(f"   → Step {i+2}: Executing {current_tool.upper()} with query: '{enhanced_query}'")
+            try:
+                results[current_tool] = await self.tool_manager.execute_tool(current_tool, query=enhanced_query, user_id=user_id)
+                logger.info(f"   ✅ {current_tool} completed")
+            except Exception as e:
+                logger.error(f"   ❌ {current_tool} failed: {e}")
+                results[current_tool] = {"error": str(e)}
+        
+        return results
+    
+    async def _middleware_summarizer(self, previous_results: Dict, original_query: str, next_tool: str) -> str:
+        """Middleware: Extract key info from previous tool results and generate enhanced query"""
+        
+        # Format previous results
+        previous_data = []
+        for tool_name, result in previous_results.items():
+            if isinstance(result, dict):
+                if 'retrieved' in result:
+                    previous_data.append(f"{tool_name.upper()} found: {result['retrieved'][:1000]}")
+                elif 'results' in result and isinstance(result['results'], list):
+                    for item in result['results'][:3]:
+                        if 'snippet' in item:
+                            previous_data.append(f"{tool_name.upper()}: {item['snippet'][:500]}")
+        
+        previous_summary = "\n".join(previous_data) if previous_data else "No data from previous tools"
+        
+        # SPECIAL HANDLING FOR CALCULATOR
+        if next_tool == "calculator":
+            middleware_prompt = f"""Extract numbers from the data for calculation.
 
+    ORIGINAL USER QUERY: {original_query}
+
+    PREVIOUS TOOL RESULTS:
+    {previous_summary}
+
+    Your task: Find numerical values (prices, percentages, quantities) in the data above and create a math expression.
+
+    Rules:
+    - Look for prices: ₹20,000 → 20000, $500 → 500
+    - Look for percentages: 15% → 0.15
+    - Based on query intent, create expression:
+    * Compare/difference → "number1 - number2"
+    * Total/sum → "number1 + number2"
+    * Percentage of → "number1 * 0.XX"
+
+    Examples:
+    - If data shows "Mochand: ₹20,000" and "Competitor: $500" and query is "compare pricing" → "20000 - 500"
+    - If data shows "Price: $100" and query is "calculate 15% discount" → "100 * 0.15"
+
+    Return ONLY a valid math expression (e.g., "20000 - 500"). If no clear numbers found, return "SKIP"."""
+        
+        else:
+            # YOUR EXISTING WEB SEARCH LOGIC (KEEP AS-IS)
+            middleware_prompt = f"""Extract key information and create an enhanced search query.
+
+    ORIGINAL USER QUERY: {original_query}
+
+    PREVIOUS TOOL RESULTS:
+    {previous_summary}
+
+    NEXT TOOL: {next_tool}
+
+    Your task: Extract the main product/entity name, category, and key features from the results above, then create a focused search query for {next_tool}.
+
+    Examples:
+    - If results mention "Mochand is a customer support chatbot for WhatsApp" → "customer support chatbot WhatsApp competitors 2025"
+    - If results mention "Our CRM system helps sales teams" → "CRM systems sales teams alternatives 2025"
+    - If results mention "AI-powered email automation tool" → "AI email automation tools competitors 2025"
+
+    Return ONLY the search query, nothing else. Keep it focused and under 10 words."""
+        
+        try:
+            logger.info(f"🔄 Calling middleware LLM...")
+            response = await self.brain_llm.generate(
+                [{"role": "user", "content": middleware_prompt}],
+                temperature=0.2,
+                max_tokens=100
+            )
+            
+            enhanced_query = response.strip()
+            logger.info(f"🔄 Middleware generated: '{enhanced_query}'")
+            
+            return enhanced_query
+            
+        except Exception as e:
+            logger.error(f"Middleware failed: {e}")
+            return original_query
+
+    
     async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, chat_history: List[Dict]) -> str:
         """Generate response with simple business mode switching like old system"""
         
@@ -546,7 +697,11 @@ Return ONLY valid JSON:
     - After they share pain points and seek guidance: Provide specific Mochand solutions
     - Match their engagement level naturally
     5. Stay in character as their helpful dost friend throughout
-    6. End with engaging question to continue conversation naturally
+    6. End naturally based on context:
+    - If user asks specific question → Provide info, optional question
+    - If user seems to want guidance → Ask clarifying question
+    - If providing detailed data → Just end with the info
+    - Mix question and non-question endings for natural flow
     7. ONLY use information from the available data above - never add facts not provided
     
     Be specific when data is specific:
@@ -612,23 +767,20 @@ Return ONLY valid JSON:
         
         return " \n ".join(context_parts) if context_parts else "No previous context"
     
-    # ⚠️ MINOR MODIFICATION: Handle indexed tool names in formatting
     def _format_tool_results(self, tool_results: dict) -> str:
-        """Format tool results for response generation, handling different tool structures and indexed names."""
+        """Format tool results for response generation, handling different tool structures."""
         if not tool_results:
             return "No external data available"
         
         import json
+        # Save raw tool results for debugging
         logger.info(f"🔍 RAW TOOL RESULTS DEBUG:")
         for tool_name, result in tool_results.items():
             logger.info(f"\n{'='*60}")
             logger.info(f"TOOL: {tool_name.upper()}")
             logger.info(f"{'='*60}")
             
-            # Extract base tool name for type checking
-            base_tool = self._get_base_tool_name(tool_name)
-            
-            if base_tool == 'web_search' and isinstance(result, dict):
+            if tool_name == 'web_search' and isinstance(result, dict):
                 logger.info(f"Web Search Query: {result.get('query', 'N/A')}")
                 logger.info(f"Success: {result.get('success', False)}")
                 
@@ -646,8 +798,6 @@ Return ONLY valid JSON:
         formatted = []
         
         for tool, result in tool_results.items():
-            base_tool = self._get_base_tool_name(tool)
-            
             if isinstance(result, dict) and 'error' not in result:
                 # Handle RAG-style result
                 if 'success' in result and result['success']:
@@ -658,7 +808,7 @@ Return ONLY valid JSON:
                         if chunks:
                             formatted.append(f"{tool.upper()} CHUNKS:\n" + "\n---\n".join(chunks))
                     
-                    # Handle web search-style results (indexed or not)
+                    # Handle web search-style results
                     elif 'results' in result and isinstance(result['results'], list):
                         formatted.append(f"{tool.upper()} SEARCH RESULTS for query: {result.get('query', '')}\n")
                         for item in result['results']:
@@ -699,16 +849,6 @@ Return ONLY valid JSON:
                         phrases.append(sentence.strip()[:30])
         
         return phrases[-5:] if phrases else []
-    
-    def _clean_json_response(self, response: str) -> str:
-        """Clean LLM response for JSON parsing"""
-        response = response.strip()
-        
-        # Remove thinking tags
-        if '<think>' in response:
-            end_idx = response.find('</think>')
-            if end_idx != -1:
-                response = response[end_idx + 8:].strip()
     
     def _clean_json_response(self, response: str) -> str:
         """Clean LLM response for JSON parsing"""
