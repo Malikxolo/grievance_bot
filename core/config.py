@@ -124,6 +124,9 @@ class Config:
         scrapingdog_key = os.getenv('SCRAPINGDOG_API_KEY')
         valueserp_key = os.getenv('VALUESERP_API_KEY')
         openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        jina_key = os.getenv('JINA_API_KEY')
+        print(f"🔍 DEBUG: JINA_API_KEY from env: {jina_key[:20] if jina_key else '❌ NOT FOUND IN ENV!'}")
+
         
         # Web search is enabled if we have OpenRouter (for Perplexity) or search API keys
         web_search_enabled = bool(openrouter_key or scrapingdog_key or valueserp_key)
@@ -138,6 +141,7 @@ class Config:
                 'provider': 'perplexity' if use_premium_search else ('scrapingdog' if scrapingdog_key else 'valueserp'),
                 'web_model': web_model if use_premium_search else None,
                 'primary_key': scrapingdog_key or valueserp_key,  # For non-Perplexity providers
+                'jina_key': jina_key,
                 'description': f'Internet search using {"Perplexity " + web_model if use_premium_search else "ScrapingDog/ValueSerp"}',
                 'model_info': {
                     'selected_model': web_model,

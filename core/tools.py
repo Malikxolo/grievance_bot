@@ -159,14 +159,15 @@ class CalculatorTool(BaseTool):
 class WebSearchTool(BaseTool):
     """Web search tool with multiple provider support"""
     
-    def __init__(self, api_key: str, web_model: str, provider: str = "perplexity"):
+    def __init__(self, api_key: str, web_model: str, provider: str = "perplexity", jina_api_key: str = None):
         super().__init__(
             "web_search", 
             "Search the internet for current information"
         )
         self.api_key = api_key
         self.provider = provider
-        self.web_model = web_model  # Fixed: properly store the web model
+        self.web_model = web_model
+        self.jina_api_key = jina_api_key  
         self.session = None
         
         print(f"WebSearchTool initialized with provider: {provider}, model: {web_model}")
@@ -181,7 +182,7 @@ class WebSearchTool(BaseTool):
         
         try:
             if self.provider == "scrapingdog":
-                return await self._scrapingdog_search(query, num_results)
+                return await self._scrapingdog_search(query, num_results, scrape_top=3)
             elif self.provider == "valueserp":
                 return await self._valueserp_search(query, num_results)
             elif self.provider == "perplexity":
@@ -199,7 +200,7 @@ class WebSearchTool(BaseTool):
                 "provider": self.provider
             }
     
-    async def _scrapingdog_search(self, query: str, num_results: int) -> Dict[str, Any]:
+    async def _scrapingdog_search(self, query: str, num_results: int, scrape_top: int = 3) -> Dict[str, Any]:
         """Search using ScrapingDog Google SERP API"""
         
         params = {
@@ -221,8 +222,7 @@ class WebSearchTool(BaseTool):
             data = await response.json()
             
             results = []
-            # CHANGE THIS LINE:
-            for item in data.get("organic_results", [])[:num_results]:  # organic_results NOT organic_data
+            for item in data.get("organic_results", [])[:num_results]: 
                 results.append({
                     "title": item.get("title", ""),
                     "snippet": item.get("snippet", ""),
@@ -230,16 +230,66 @@ class WebSearchTool(BaseTool):
                     "position": item.get("rank", 0)
                 })
             
+            # Scrape top results with Jina
+            if scrape_top > 0 and self.jina_api_key:
+                logger.info(f" Starting Jina scraping for top {scrape_top} results...")
+                
+                for i, result in enumerate(results[:scrape_top]):
+                    url = result.get("link", "")
+                    if url:
+                        logger.info(f" [{i+1}/{scrape_top}] Scraping: {url}")
+                        scraped = await self._scrape_with_jina(url)
+                        result["scraped_content"] = scraped
+                        
+                        if scraped.startswith("["):
+                            logger.warning(f" Failed: {scraped}")
+                        else:
+                            logger.info(f" Scraped {len(scraped)} chars")
+                            logger.debug(f" Preview: {scraped[:200]}...")
+            
             return {
                 "success": True,
                 "query": query,
                 "results": results,
                 "total_results": len(results),
+                "scraped_count": min(scrape_top, len(results)) if scrape_top > 0 and self.jina_api_key else 0,
                 "provider": "scrapingdog"
             }
 
+    async def _scrape_with_jina(self, url: str) -> str:
+        """Scrape URL using Jina Reader API"""
+        try:
+            jina_url = f"https://r.jina.ai/{url}"
+            
+            print(f" JINA REQUEST: {jina_url}") 
+        
+            headers = {
+                "Authorization": f"Bearer {self.jina_api_key}",
+                "X-Return-Format": "markdown",
+                "X-Exclude-Selector": "header",
+                "X-Retain-Images": "none"
+            }
+            
+            async with self.session.get(jina_url, headers=headers, timeout=30) as response:
+                print(f" JINA STATUS: {response.status}") 
+                
+                if response.status == 200:
+                    content = await response.text()
+                    print(f" JINA SUCCESS: {len(content)} chars")
+                    return content
+                else:
+                    error = await response.text()
+                    print(f" JINA ERROR: {error[:200]}") 
+                    return f"[HTTP {response.status}]"
+                    
+        except asyncio.TimeoutError:
+            print(f" JINA TIMEOUT") 
+            return "[Timeout]"
+        except Exception as e:
+            print(f" JINA EXCEPTION: {str(e)}") 
+            return f"[Error: {str(e)}]"
 
-    
+             
     async def _valueserp_search(self, query: str, num_results: int) -> Dict[str, Any]:
         """Search using ValueSerp API"""
         
@@ -300,7 +350,7 @@ class WebSearchTool(BaseTool):
                 "results": results,
                 "total_results": 1,
                 "provider": "perplexity",
-                "model_used": model_name  # Include model info in response
+                "model_used": model_name  
             }
             
         except Exception as e:
@@ -470,7 +520,8 @@ class ToolManager:
                 self.tools["web_search"] = WebSearchTool(
                     api_key or "",  # Empty string for Perplexity
                     web_model=web_config.get("web_model", self.web_model or "perplexity/sonar"),
-                    provider=web_config.get("provider", "perplexity")
+                    provider=web_config.get("provider", "perplexity"),
+                    jina_api_key=web_config.get("jina_key")
                 )
                 print(f"WebSearchTool created with model: {web_config.get('web_model', self.web_model)}")
             else:

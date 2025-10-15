@@ -57,10 +57,10 @@ class OptimizedAgent:
     
     async def process_query(self, query: str, chat_history: List[Dict] = None, user_id: str = None) -> Dict[str, Any]:
         """Process query with minimal LLM calls"""
-        logger.info(f"🚀 PROCESSING QUERY: '{query}'")
+        logger.info(f" PROCESSING QUERY: '{query}'")
         start_time = datetime.now()
         
-        logger.info(f"🔍 DEBUG CHAT HISTORY:")
+        logger.info(f" DEBUG CHAT HISTORY:")
         logger.info(f"   Type: {type(chat_history)}")
         logger.info(f"   Length: {len(chat_history) if chat_history else 0}")
         logger.info(f"   Content: {chat_history}")
@@ -74,10 +74,10 @@ class OptimizedAgent:
                 f.write(json.dumps(chat_history))
             analysis = await self._comprehensive_analysis(query, chat_history)
             analysis_time = (datetime.now() - analysis_start).total_seconds()
-            logger.info(f"⏱️ Analysis completed in {analysis_time:.2f}s")
+            logger.info(f" Analysis completed in {analysis_time:.2f}s")
             
             # LOG: Enhanced analysis results
-            logger.info(f"📊 ANALYSIS RESULTS:")
+            logger.info(f" ANALYSIS RESULTS:")
             logger.info(f"   Intent: {analysis.get('semantic_intent', 'Unknown')}")
             business_opp = analysis.get('business_opportunity', {})
             logger.info(f"   Business Confidence: {business_opp.get('composite_confidence', 0)}/100")
@@ -103,10 +103,10 @@ class OptimizedAgent:
                 user_id
             )
             tool_time = (datetime.now() - tool_start).total_seconds()
-            logger.info(f"⏱️ Tools executed in {tool_time:.2f}s")
+            logger.info(f" Tools executed in {tool_time:.2f}s")
             
             if tool_results:
-                logger.info(f"🛠️ TOOL RESULTS SUMMARY:")
+                logger.info(f" TOOL RESULTS SUMMARY:")
                 for tool_name, result in tool_results.items():
                     if isinstance(result, dict) and result.get('success'):
                         logger.info(f"   {tool_name}: SUCCESS - {len(str(result))} chars of data")
@@ -115,10 +115,10 @@ class OptimizedAgent:
                     else:
                         logger.info(f"   {tool_name}: RESULT - {type(result)} returned")
             else:
-                logger.info(f"🛠️ NO TOOLS EXECUTED - Conversational response only")
+                logger.info(f" NO TOOLS EXECUTED - Conversational response only")
             
             response_start = datetime.now()
-            logger.info(f"💭 PASSING TO RESPONSE GENERATOR:")
+            logger.info(f" PASSING TO RESPONSE GENERATOR:")
             logger.info(f"   Analysis data: {len(str(analysis))} chars")
             logger.info(f"   Tool data: {len(str(tool_results))} chars")
             logger.info(f"   Strategy: {analysis.get('response_strategy', {})}")
@@ -130,7 +130,7 @@ class OptimizedAgent:
                 chat_history
             )
             response_time = (datetime.now() - response_start).total_seconds()
-            logger.info(f"⏱️ Response generated in {response_time:.2f}s")
+            logger.info(f" Response generated in {response_time:.2f}s")
             
             total_time = (datetime.now() - start_time).total_seconds()
             
@@ -139,7 +139,7 @@ class OptimizedAgent:
             if execution_mode == 'sequential':
                 llm_calls += 1  # Middleware
             
-            logger.info(f"✅ TOTAL PROCESSING TIME: {total_time:.2f}s ({llm_calls} LLM calls)")
+            logger.info(f" TOTAL PROCESSING TIME: {total_time:.2f}s ({llm_calls} LLM calls)")
             
             return {
                 "success": True,
@@ -158,7 +158,7 @@ class OptimizedAgent:
             }
             
         except Exception as e:
-            logger.error(f"❌ Processing failed: {str(e)}")
+            logger.error(f" Processing failed: {str(e)}")
             return {
                 "success": False,
                 "error": str(e),
@@ -202,7 +202,7 @@ class OptimizedAgent:
 
     async def _comprehensive_analysis(self, query: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Single LLM call for ALL analysis needs"""
-        logger.info(f"🔍 ANALYSIS DEBUG:")
+        logger.info(f" ANALYSIS DEBUG:")
         logger.info(f"   Chat History Type: {type(chat_history)}")
         logger.info(f"   Chat History Content: {chat_history}")
         logger.info(f"   Chat History Length: {len(chat_history) if chat_history else 0}")
@@ -421,7 +421,7 @@ Return ONLY valid JSON:
             with open("debug_request_payload.json", "w") as f:
                 json.dumps(messages)
             
-            logger.info(f"🧠 CALLING BRAIN LLM for analysis...")
+            logger.info(f" CALLING BRAIN LLM for analysis...")
             response = await self.brain_llm.generate(
                 messages,
                 temperature=0.1,
@@ -429,12 +429,12 @@ Return ONLY valid JSON:
             )
             
             # LOG: Raw LLM response
-            logger.info(f"🧠 BRAIN LLM RAW RESPONSE: {len(response)} chars")
-            logger.info(f"🧠 First 200 chars: {response[:200]}...")
+            logger.info(f" BRAIN LLM RAW RESPONSE: {len(response)} chars")
+            logger.info(f" First 200 chars: {response[:200]}...")
             
             # Clean response
             cleaned = self._clean_json_response(response)
-            logger.info(f"🧠 CLEANED RESPONSE: {len(cleaned)} chars")
+            logger.info(f" CLEANED RESPONSE: {len(cleaned)} chars")
             
             analysis = json.loads(cleaned)
             
@@ -447,12 +447,12 @@ Return ONLY valid JSON:
                 }
             
             # LOG: Parsed analysis details
-            logger.info(f"✅ Analysis complete: intent={analysis.get('semantic_intent')}, "
+            logger.info(f" Analysis complete: intent={analysis.get('semantic_intent')}, "
                        f"business={analysis.get('business_opportunity', {}).get('detected')}, "
                        f"confidence={analysis.get('business_opportunity', {}).get('composite_confidence', 0)}, "
                        f"tools={analysis.get('tools_to_use', [])}")
             
-            logger.info(f"🧠 FULL ANALYSIS GENERATED:")
+            logger.info(f" FULL ANALYSIS GENERATED:")
             logger.info(f"   Semantic Intent: {analysis.get('semantic_intent', 'Unknown')}")
             logger.info(f"   Business Opportunity: {analysis.get('business_opportunity', {})}")
             logger.info(f"   Tools to Use: {analysis.get('tools_to_use', [])}")
@@ -508,10 +508,10 @@ Return ONLY valid JSON:
         
         # Route to appropriate execution method
         if execution_mode == 'sequential' and len(tools) > 1:
-            logger.info(f"🔧 SEQUENTIAL EXECUTION MODE")
+            logger.info(f" SEQUENTIAL EXECUTION MODE")
             return await self._execute_sequential(tools, query, analysis, user_id)
         else:
-            logger.info(f"🔧 PARALLEL EXECUTION MODE")
+            logger.info(f" PARALLEL EXECUTION MODE")
             return await self._execute_parallel(tools, query, analysis, user_id)
     
     async def _execute_parallel(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
@@ -525,7 +525,7 @@ Return ONLY valid JSON:
             if tool in self.available_tools:
                 # Use enhanced query if available, fallback to raw query
                 tool_query = enhanced_queries.get(tool, query)
-                logger.info(f"🔧 {tool.upper()} ENHANCED QUERY: '{tool_query}'")
+                logger.info(f" {tool.upper()} ENHANCED QUERY: '{tool_query}'")
                 
                 task = self.tool_manager.execute_tool(tool, query=tool_query, user_id=user_id)
                 tasks.append((tool, task))
@@ -536,9 +536,9 @@ Return ONLY valid JSON:
                 try:
                     result = await task
                     results[tool_name] = result
-                    logger.info(f"✅ Tool {tool_name} executed successfully")
+                    logger.info(f" Tool {tool_name} executed successfully")
                 except Exception as e:
-                    logger.error(f"❌ Tool {tool_name} failed: {e}")
+                    logger.error(f" Tool {tool_name} failed: {e}")
                     results[tool_name] = {"error": str(e)}
         
         return results
@@ -560,9 +560,9 @@ Return ONLY valid JSON:
         
         try:
             results[first_tool] = await self.tool_manager.execute_tool(first_tool, query=first_query, user_id=user_id)
-            logger.info(f"   ✅ {first_tool} completed")
+            logger.info(f"   {first_tool} completed")
         except Exception as e:
-            logger.error(f"   ❌ {first_tool} failed: {e}")
+            logger.error(f"   {first_tool} failed: {e}")
             results[first_tool] = {"error": str(e)}
             # Return early if first tool fails
             return results
@@ -589,9 +589,9 @@ Return ONLY valid JSON:
             logger.info(f"   → Step {i+2}: Executing {current_tool.upper()} with query: '{enhanced_query}'")
             try:
                 results[current_tool] = await self.tool_manager.execute_tool(current_tool, query=enhanced_query, user_id=user_id)
-                logger.info(f"   ✅ {current_tool} completed")
+                logger.info(f"  {current_tool} completed")
             except Exception as e:
-                logger.error(f"   ❌ {current_tool} failed: {e}")
+                logger.error(f"   {current_tool} failed: {e}")
                 results[current_tool] = {"error": str(e)}
         
         return results
@@ -676,7 +676,7 @@ Return ONLY valid JSON:
         Return ONLY the search query, nothing else. Keep it focused and under 10 words."""
         
         try:
-            logger.info(f"🔄 Calling middleware LLM...")
+            logger.info(f" Calling middleware LLM...")
             response = await self.brain_llm.generate(
                 [{"role": "user", "content": middleware_prompt}],
                 temperature=0.2,
@@ -684,7 +684,7 @@ Return ONLY valid JSON:
             )
             
             enhanced_query = response.strip()
-            logger.info(f"🔄 Middleware generated: '{enhanced_query}'")
+            logger.info(f" Middleware generated: '{enhanced_query}'")
             
             return enhanced_query
             
@@ -710,7 +710,7 @@ Return ONLY valid JSON:
         sentiment_guidance = self._build_sentiment_language_guide(sentiment)
         
         # Enhanced logging
-        logger.info(f"❤️ RESPONSE GENERATION INPUTS:")
+        logger.info(f"  RESPONSE GENERATION INPUTS:")
         logger.info(f"   Intent: {intent}")
         logger.info(f"   Business Opportunity Detected: {business_detected}")
         logger.info(f"   Conversation Mode: {conversation_mode}")
@@ -722,11 +722,11 @@ Return ONLY valid JSON:
         
         # Format tool results
         tool_data = self._format_tool_results(tool_results)
-        logger.info(f"❤️ FORMATTED TOOL DATA: {len(tool_data)} chars")
+        logger.info(f" FORMATTED TOOL DATA: {len(tool_data)} chars")
         
         # Build memory context to avoid repetition
         recent_phrases = self._extract_recent_phrases(chat_history)
-        logger.info(f"❤️ RECENT PHRASES TO AVOID: {recent_phrases}")
+        logger.info(f" RECENT PHRASES TO AVOID: {recent_phrases}")
         
         # Simple, clean prompt (like your old system)
         response_prompt = f"""You are Mochand Dost - a naturally helpful AI friend who becomes a smart business consultant when needed.
@@ -779,8 +779,8 @@ Return ONLY valid JSON:
                 "detailed": 700
             }.get(strategy.get('length', 'medium'), 500)
             
-            logger.info(f"❤️ CALLING HEART LLM for response generation...")
-            logger.info(f"❤️ Max tokens: {max_tokens}, Temperature: 0.4")
+            logger.info(f" CALLING HEART LLM for response generation...")
+            logger.info(f" Max tokens: {max_tokens}, Temperature: 0.4")
             
             messages = chat_history if chat_history else []
             messages.append({"role": "user", "content": response_prompt})
@@ -794,15 +794,15 @@ Return ONLY valid JSON:
             )
             
             # LOG: Raw response from Heart LLM
-            logger.info(f"❤️ HEART LLM RAW RESPONSE: {len(response)} chars")
-            logger.info(f"❤️ First 200 chars: {response[:200]}...")
+            logger.info(f" HEART LLM RAW RESPONSE: {len(response)} chars")
+            logger.info(f" First 200 chars: {response[:200]}...")
             
             # Clean and format
             response = self._clean_response(response)
-            logger.info(f"❤️ FINAL CLEANED RESPONSE: {len(response)} chars")
-            logger.info(f"❤️ FINAL RESPONSE: {response}")
+            logger.info(f" FINAL CLEANED RESPONSE: {len(response)} chars")
+            logger.info(f" FINAL RESPONSE: {response}")
             
-            logger.info(f"✅ Response generated: {len(response)} chars")
+            logger.info(f" Response generated: {len(response)} chars")
             return response
             
         except Exception as e:
@@ -829,9 +829,7 @@ Return ONLY valid JSON:
         if not tool_results:
             return "No external data available"
         
-        import json
-        # Save raw tool results for debugging
-        logger.info(f"🔍 RAW TOOL RESULTS DEBUG:")
+        logger.info(f" RAW TOOL RESULTS DEBUG:")
         for tool_name, result in tool_results.items():
             logger.info(f"\n{'='*60}")
             logger.info(f"TOOL: {tool_name.upper()}")
@@ -840,6 +838,7 @@ Return ONLY valid JSON:
             if tool_name == 'web_search' and isinstance(result, dict):
                 logger.info(f"Web Search Query: {result.get('query', 'N/A')}")
                 logger.info(f"Success: {result.get('success', False)}")
+                logger.info(f"Scraped Count: {result.get('scraped_count', 0)}") 
                 
                 if 'results' in result and isinstance(result['results'], list):
                     logger.info(f"Number of results: {len(result['results'])}")
@@ -849,6 +848,15 @@ Return ONLY valid JSON:
                         logger.info(f"Title: {item.get('title', 'No title')}")
                         logger.info(f"Snippet: {item.get('snippet', 'No snippet')}")
                         logger.info(f"Link: {item.get('link', 'No link')}")
+                        
+                        # scraped content
+                        if 'scraped_content' in item:
+                            scraped = item['scraped_content']
+                            if scraped and not scraped.startswith("["):
+                                logger.info(f"Scraped: {len(scraped)} chars")
+                                logger.debug(f"Preview: {scraped[:200]}...")
+                            else:
+                                logger.info(f"Scraped: {scraped}")
         
         logger.info(f"\n{'='*60}\n")
         
@@ -872,7 +880,33 @@ Return ONLY valid JSON:
                             title = item.get('title', 'No title')
                             snippet = item.get('snippet', '')
                             link = item.get('link', '')
-                            formatted.append(f"- {title}\n  {snippet}\n  Link: {link}")
+                            
+                            # scraped content
+                            if 'scraped_content' in item and item['scraped_content']:
+                                scraped = item['scraped_content']
+                                if not scraped.startswith("["):
+                                    # UNIVERSAL CLEANUP - no char limit
+                                    lines = scraped.split('\n')
+                                    cleaned_lines = []
+                                    
+                                    for line in lines:
+                                        line = line.strip()
+                                        if len(line) < 40:  # Skip short lines (nav/menus)
+                                            continue
+                                        if line.count('http') > 2:  # Skip link lists
+                                            continue
+                                        if line.startswith('![') or line.startswith('Image'):  # Skip images
+                                            continue
+                                        cleaned_lines.append(line)
+                                    
+                                    # Join all cleaned lines
+                                    cleaned = '\n'.join(cleaned_lines)
+                                    
+                                    formatted.append(f"- {title}\n  Content:\n{cleaned}\n  Link: {link}")
+                                else:
+                                    formatted.append(f"- {title}\n  {snippet}\n  Link: {link}")
+                            else:
+                                formatted.append(f"- {title}\n  {snippet}\n  Link: {link}")
                     
                     # Generic fallback for other data/result keys
                     elif 'data' in result:
@@ -889,6 +923,7 @@ Return ONLY valid JSON:
                 formatted.append(f"{tool.upper()}: {result}")
         
         return "\n\n".join(formatted) if formatted else "No usable tool data"
+
 
     def _extract_recent_phrases(self, chat_history: List[Dict]) -> List[str]:
         """Extract recent phrases to avoid repetition"""
