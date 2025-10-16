@@ -224,23 +224,32 @@ AVAILABLE TOOLS:
 
 Perform ALL of the following analyses in ONE response:
 
-1. SEMANTIC INTENT (what user really wants)
-   - What is the user trying to accomplish?
-     * Solve a problem? (seeking solutions/recommendations)
-     * Get information? (factual query, price check, comparison)
-     * Learn something? (educational/conceptual)
-     * Chat casually? (greetings, small talk)
+1. MULTI-TASK DETECTION & DECOMPOSITION:
+   - Analyze the user query to identify if it contains multiple distinct, actionable tasks or questions.
+   - Look for:
+     * Multiple questions separated by "and", "also", "plus", or similar connectors
+     * Different types of information requests (e.g., weather + recommendations, prices + comparisons)
+     * Sequential tasks where one leads to another
+     * Independent tasks that can be handled separately
    
-   - If solving a problem:
-     * What problem are they facing?
-     * What solution did they mention, if any?
-     * What constraints do they have?
+   - If 2 or more distinct tasks are found:
+     * Set `multi_task_detected` to `true`
+     * List each task clearly in the `sub_tasks` array
+     * Determine if tasks are dependent (sequential) or independent (parallel)
    
-   - Final intent: Based on the above, what should we help them with?
+   - If only one task is found, set `multi_task_detected` to `false`
    
-   Include every specific number, measurement, name, date, and technical detail from the user's query in your intent description. If they mentioned it, it's important - keep it
+   - Examples:
+     * "What's the weather in Lucknow and what should I wear?" → 2 tasks: [weather query, clothing recommendation]
+     * "iPhone 16 price and Samsung S24 price" → 2 tasks: [iPhone pricing, Samsung pricing]
+     * "Compare our product with competitors" → 1 task: [product comparison]
 
-2. MOCHAND PRODUCT OPPORTUNITY ANALYSIS:
+2. SEMANTIC INTENT (overall user goal)
+   - Based on the decomposed tasks, what is the user's ultimate goal?
+   - Synthesize the sub-tasks into a comprehensive understanding of what they want to achieve
+   - Include every specific number, measurement, name, date, and technical detail from the user's query
+
+3. MOCHAND PRODUCT OPPORTUNITY ANALYSIS:
 
    WHAT MOCHAND DOES (context for understanding):
    - AI chatbot for customer communication automation
@@ -262,24 +271,27 @@ Perform ALL of the following analyses in ONE response:
    - Vague queries without keywords ("maintaining business", "business troubles")  
    - Other domains: accounting, inventory, HR, logistics
 
-3. TOOL SELECTION:
+4. TOOL SELECTION FOR MULTI-TASK QUERIES:
 
-    RAG SELECTION (STRICT RULE):
-    Select rag if EITHER:
-    1. Query is directly ABOUT Mochand (mentions "Mochand", "our/your product", "this chatbot", "what can you do", or asks about your capabilities/features)
-    2. OR business_opportunity.detected = true
-
-    Do NOT select rag for any other topic, even if you think RAG might contain related information
+   For EACH sub-task identified in step 1, select the most appropriate tool:
    
+   RAG SELECTION (STRICT RULE):
+   Select `rag` for a sub-task if EITHER:
+   1. The sub-task is directly ABOUT Mochand (mentions "Mochand", "our/your product", "this chatbot", etc.)
+   2. OR business_opportunity.detected = true for that sub-task
+
    GENERAL TOOL SELECTION:
-   For web_search and calculator, analyze what information is needed:
-   - What information is needed?
-   - Where can it come from?
-   - Select appropriate tools
+   - `web_search`: For current information, prices, comparisons, weather, news, etc.
+   - `calculator`: For mathematical calculations, statistical operations
+   - `rag`: For Mochand-specific information only
+   
+   IMPORTANT: The `tools_to_use` array should contain one tool for each sub-task.
+   - If you have 2 sub-tasks needing web_search, include ["web_search", "web_search"]
+   - If you have 1 sub-task needing web_search and 1 needing calculator, include ["web_search", "calculator"]
    
    Use NO tools for:
    - Greetings, casual chat
-   - General knowledge questions
+   - General knowledge questions that don't require current information
 
 4. SENTIMENT & PERSONALITY:
    - User's emotional state (frustrated/excited/casual/urgent/confused)
@@ -289,93 +301,114 @@ Perform ALL of the following analyses in ONE response:
    - Response length (micro/short/medium/detailed)
    - Language style (hinglish/english/professional/casual)
 
-6. DEPENDENCY & QUERY OPTIMIZATION:
+6. DEPENDENCY & EXECUTION PLANNING FOR MULTI-TASK QUERIES:
 
-    Step 1: If 2+ tools selected, detect dependencies
+    Step 1: Analyze task dependencies
+    
+    DEFAULT = PARALLEL (tasks are independent)
+    
+    For each sub-task, ask: "Does this task need information from another task to complete?"
+    
+    Common dependency patterns:
+    - Weather + clothing recommendation → SEQUENTIAL (clothing depends on weather data)
+    - Product features + competitor comparison → SEQUENTIAL (comparison needs product info)
+    - iPhone price + Samsung price → PARALLEL (completely independent)
+    - Math calculation + web search for formula → SEQUENTIAL (calculation needs formula)
+    
+    Step 2: Create execution plan with indexed tool names
+    
+    CRITICAL: Create unique indexed names for each tool execution:
+    - Format: `tool_name_index` (e.g., `web_search_0`, `web_search_1`, `rag_0`)
+    - The `order` array must contain these indexed names
+    - The `enhanced_queries` object keys must EXACTLY match the indexed names in `order`
+    
+    Step 3: Generate queries for each indexed tool
+    
+    For PARALLEL mode:
+    - Each indexed tool gets its own specific query based on its corresponding sub-task
+    - Example: `web_search_0`: "iPhone 16 price", `web_search_1`: "Samsung S24 price"
+    
+    For SEQUENTIAL mode:
+    - ONLY the first indexed tool (position 0) gets a real query
+    - ALL subsequent tools get "WAIT_FOR_PREVIOUS"
+    - Example: `rag_0`: "Mochand features", `web_search_0`: "WAIT_FOR_PREVIOUS"
+    
+    Query optimization rules:
+    - RAG: "Mochand" + [specific topic from sub-task]
+    - Calculator: Extract numbers from sub-task, create valid Python expression
+    - Web_search: Transform sub-task into focused search query, preserve qualifiers (when, how much, what type), add "2025" if time-sensitive
 
-    DEFAULT = PARALLEL (tools run independently)
+    EXAMPLES OF MULTI-TASK HANDLING:
 
-    Ask: "Does any tool need data from another tool's results to execute?"
-
-    Common cases:
-    - Calculator needs numbers/prices from web_search → SEQUENTIAL
-    - Web_search needs info about "our product" from rag → SEQUENTIAL  
-    - Two separate questions or topics → PARALLEL
-
-    If any tool depends on another's output → mode="sequential"
-    Otherwise → mode="parallel"
-
-    Step 2: Generate queries based on POSITION in order array
-
-    CRITICAL RULE FOR SEQUENTIAL MODE:
-    → ONLY order[0] (first tool) gets a real query
-    → ALL other tools (order[1], order[2], etc.) get "WAIT_FOR_PREVIOUS"
-    → Do NOT generate real queries for any tool after the first one
-
-    For tools that need real queries (first tool OR parallel mode):
-    Query format rules:
-    - RAG: "Mochand" + [topic from query]
-    - calculator: Extract ONLY numbers from query, create valid Python math expression (no units, no text)
-    - web_search: Transform the semantic_intent into a search query. Crucially, re-read the user's original query and preserve any words that specify WHEN (like "upcoming," "latest"), HOW MUCH (like "cheapest," "under 15000"), or WHAT TYPE (like "second-hand," "budget"). These qualifiers are critical to search accuracy. Add "2025" if time-sensitive.
-
-
-    For tools that are waiting (order[1], order[2], etc. in sequential):
-    - Set query to exactly: "WAIT_FOR_PREVIOUS"
-    - Middleware will generate context-aware queries after previous tool completes
-
-    Examples showing position-based logic:
-
-    Example 1 - Sequential with 2 tools:
-    Query: "compare our product with competitors"
-    Analysis: web_search needs product info from rag → dependent
+    Example 1 - Multi-task Parallel (Independent tasks):
+    Query: "What's today's weather in Lucknow and iPhone 16 price"
+    Multi-task Analysis: 2 independent tasks → parallel
     Output:
     {{
-    "mode": "sequential",
-    "order": ["rag", "web_search"],
+    "multi_task_analysis": {{
+        "multi_task_detected": true,
+        "sub_tasks": ["Get today's weather for Lucknow", "Find iPhone 16 price"]
+    }},
+    "tools_to_use": ["web_search", "web_search"],
+    "tool_execution": {{
+        "mode": "parallel",
+        "order": ["web_search_0", "web_search_1"],
+        "dependency_reason": "Weather and phone pricing are independent queries"
+    }},
     "enhanced_queries": {{
-        "rag": "Mochand features pricing",        ← Position 0: real query
-        "web_search": "WAIT_FOR_PREVIOUS"         ← Position 1: wait
+        "web_search_0": "today weather Lucknow",
+        "web_search_1": "iPhone 16 price 2025"
     }}
     }}
 
-    Example 2 - Sequential with 3 tools:
-    Query: "compare our product pricing to competitors and calculate difference"
-    Analysis: All tools dependent in chain → sequential
+    Example 2 - Multi-task Sequential (Dependent tasks):
+    Query: "What's today's weather in Lucknow and what should I wear?"
+    Multi-task Analysis: 2 dependent tasks → sequential
     Output:
     {{
-    "mode": "sequential",
-    "order": ["rag", "web_search", "calculator"],
+    "multi_task_analysis": {{
+        "multi_task_detected": true,
+        "sub_tasks": ["Get today's weather for Lucknow", "Get clothing recommendation based on weather"]
+    }},
+    "tools_to_use": ["web_search", "web_search"],
+    "tool_execution": {{
+        "mode": "sequential",
+        "order": ["web_search_0", "web_search_1"],
+        "dependency_reason": "Clothing recommendation depends on weather data"
+    }},
     "enhanced_queries": {{
-        "rag": "Mochand pricing",                 ← Position 0: real query
-        "web_search": "WAIT_FOR_PREVIOUS",        ← Position 1: wait
-        "calculator": "WAIT_FOR_PREVIOUS"         ← Position 2: wait
+        "web_search_0": "today weather Lucknow temperature conditions",
+        "web_search_1": "WAIT_FOR_PREVIOUS"
     }}
     }}
 
-    Example 3 - Parallel (completely independent):
-    Query: "calculate 50 times 20"
-    Analysis: Calculator has ALL numbers from query, no other tool needed → independent
-    Output:
-    {{
-    "mode": "parallel",
-    "enhanced_queries": {{
-        "calculator": "50 * 20"
-    }}
-    }}
-
-    Example 4 - Single tool (always parallel):
+    Example 3 - Single task:
     Query: "what is my product?"
+    Multi-task Analysis: 1 task → single execution
     Output:
     {{
-    "mode": "parallel",
+    "multi_task_analysis": {{
+        "multi_task_detected": false,
+        "sub_tasks": ["Get information about Mochand product"]
+    }},
+    "tools_to_use": ["rag"],
+    "tool_execution": {{
+        "mode": "parallel",
+        "order": ["rag_0"],
+        "dependency_reason": ""
+    }},
     "enhanced_queries": {{
-        "rag": "Mochand product information"
+        "rag_0": "Mochand product information features"
     }}
     }}
 
 Return ONLY valid JSON:
 {{
-    "semantic_intent": "clear description of what user wants",
+    "multi_task_analysis": {{
+        "multi_task_detected": true/false,
+        "sub_tasks": ["description of task 1", "description of task 2"]
+    }},
+    "semantic_intent": "clear description of overall user goal",
     "business_opportunity": {{
         "detected": true/false,
         "composite_confidence": 0-100,
@@ -515,20 +548,32 @@ Return ONLY valid JSON:
             return await self._execute_parallel(tools, query, analysis, user_id)
     
     async def _execute_parallel(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
-        """Execute tools in parallel (original behavior)"""
+        """Execute tools in parallel (handles duplicate tool names)"""
         results = {}
         enhanced_queries = analysis.get('enhanced_queries', {})
+        logging.info(f"Enhanced queries for parallel execution: {enhanced_queries}")
         
         # Execute tools in parallel for speed
         tasks = []
-        for tool in tools:
+        tool_counter = {}  # Track occurrences of each tool type
+        
+        for i, tool in enumerate(tools):
             if tool in self.available_tools:
-                # Use enhanced query if available, fallback to raw query
-                tool_query = enhanced_queries.get(tool, query)
-                logger.info(f" {tool.upper()} ENHANCED QUERY: '{tool_query}'")
+                # Count tool occurrences for unique keys
+                count = tool_counter.get(tool, 0)
+                tool_counter[tool] = count + 1
+                
+                # Try indexed key first, then fall back to non-indexed
+                indexed_key = f"{tool}_{i}"
+                tool_query = enhanced_queries.get(indexed_key) or enhanced_queries.get(tool, query)
+                
+                logger.info(f"🔧 {tool.upper()} #{i} ENHANCED QUERY: '{tool_query}'")
+                
+                # Store results with unique keys
+                result_key = f"{tool}_{i}" if count > 0 else tool
                 
                 task = self.tool_manager.execute_tool(tool, query=tool_query, user_id=user_id)
-                tasks.append((tool, task))
+                tasks.append((result_key, task))
         
         if tasks:
             # Gather all results in parallel
@@ -554,45 +599,49 @@ Return ONLY valid JSON:
         logger.info(f"   Reason: {tool_execution.get('dependency_reason', 'N/A')}")
         
         # Execute first tool
-        first_tool = order[0]
-        first_query = enhanced_queries.get(first_tool, query)
-        logger.info(f"   → Step 1: Executing {first_tool.upper()} with query: '{first_query}'")
+        first_tool_key = order[0]  # e.g., 'web_search_0'
+        first_tool_name = first_tool_key.rsplit('_', 1)[0] if '_' in first_tool_key and first_tool_key.split('_')[-1].isdigit() else first_tool_key
+        # ^ Strips index: 'web_search_0' -> 'web_search'
+        
+        first_query = enhanced_queries.get(first_tool_key, query)
+        logger.info(f"   → Step 1: Executing {first_tool_key.upper()} with query: '{first_query}'")
         
         try:
-            results[first_tool] = await self.tool_manager.execute_tool(first_tool, query=first_query, user_id=user_id)
-            logger.info(f"   {first_tool} completed")
+            results[first_tool_key] = await self.tool_manager.execute_tool(first_tool_name, query=first_query, user_id=user_id)
+            logger.info(f"   ✅ {first_tool_key} completed")
         except Exception as e:
-            logger.error(f"   {first_tool} failed: {e}")
-            results[first_tool] = {"error": str(e)}
-            # Return early if first tool fails
+            logger.error(f"   ❌ {first_tool_key} failed: {e}")
+            results[first_tool_key] = {"error": str(e)}
             return results
         
         # Execute remaining tools with middleware
         for i in range(1, len(order)):
-            current_tool = order[i]
+            current_tool_key = order[i]  # e.g., 'web_search_1'
+            current_tool_name = current_tool_key.rsplit('_', 1)[0] if '_' in current_tool_key and current_tool_key.split('_')[-1].isdigit() else current_tool_key
+            # ^ Strips index: 'web_search_1' -> 'web_search'
             
             # Check if this tool needs middleware
-            if enhanced_queries.get(current_tool) == "WAIT_FOR_PREVIOUS":
-                logger.info(f"   → Step 2: Middleware generating enhanced query for {current_tool}...")
+            if enhanced_queries.get(current_tool_key) == "WAIT_FOR_PREVIOUS":
+                logger.info(f"   → Step 2: Middleware generating enhanced query for {current_tool_key}...")
                 
                 # Use middleware to generate enhanced query from previous results
                 enhanced_query = await self._middleware_summarizer(
                     previous_results=results,
                     original_query=query,
-                    next_tool=current_tool
+                    next_tool=current_tool_name  # Pass base name, not indexed name
                 )
                 logger.info(f"   → Middleware output: '{enhanced_query}'")
             else:
-                enhanced_query = enhanced_queries.get(current_tool, query)
+                enhanced_query = enhanced_queries.get(current_tool_key, query)
             
             # Execute current tool
-            logger.info(f"   → Step {i+2}: Executing {current_tool.upper()} with query: '{enhanced_query}'")
+            logger.info(f"   → Step {i+2}: Executing {current_tool_key.upper()} with query: '{enhanced_query}'")
             try:
-                results[current_tool] = await self.tool_manager.execute_tool(current_tool, query=enhanced_query, user_id=user_id)
-                logger.info(f"  {current_tool} completed")
+                results[current_tool_key] = await self.tool_manager.execute_tool(current_tool_name, query=enhanced_query, user_id=user_id)
+                logger.info(f"   ✅ {current_tool_key} completed")
             except Exception as e:
-                logger.error(f"   {current_tool} failed: {e}")
-                results[current_tool] = {"error": str(e)}
+                logger.error(f"   ❌ {current_tool_key} failed: {e}")
+                results[current_tool_key] = {"error": str(e)}
         
         return results
     
@@ -608,7 +657,7 @@ Return ONLY valid JSON:
                 elif 'results' in result and isinstance(result['results'], list):
                     for item in result['results'][:3]:
                         if 'snippet' in item:
-                            previous_data.append(f"{tool_name.upper()}: {item['snippet'][:500]}")
+                            previous_data.append(f"{tool_name.upper()}: {item['snippet']}")
         
         previous_summary = "\n".join(previous_data) if previous_data else "No data from previous tools"
         
@@ -653,33 +702,69 @@ Return ONLY valid JSON:
 
         
         else:
-           middleware_prompt = f"""Create a GENERIC industry search query based on previous data.
+            middleware_prompt = f"""You are a query generator. Analyze the previous results and create the NEXT search query.
 
-        ORIGINAL USER QUERY: {original_query}
+                ORIGINAL USER QUERY: {original_query}
 
-        PREVIOUS TOOL RESULTS:
-        {previous_summary}
+                PREVIOUS TOOL RESULTS:
+                {previous_summary}
 
-        Your task: Create a GENERIC industry search query.
-        Extract ONLY category/technology/use case (NOT specific company/product names).
+                INSTRUCTIONS:
+                1. Read the previous results carefully
+                2. Determine what the user wants next based on their original query
+                3. If the query has conditional logic (if/then/else), evaluate the condition using the previous results
+                4. Generate a specific, focused search query for what comes next
 
-        Examples:
-        - Query: "compare competitors", Data: "CompanyX is a customer support chatbot for WhatsApp"
-        → "customer support chatbot WhatsApp competitors 2025"
+                CONDITIONAL QUERY RULES:
+                - If query says "if weather is good/clear/sunny → suggest OUTDOOR"
+                - If query says "if weather is bad/rainy/cloudy → suggest INDOOR"
+                - Check the previous weather data to determine which condition is true
+                - Weather indicators:
+                * GOOD/OUTDOOR: "sunny", "clear", "75°F or higher", "0% rain", "no precipitation"
+                * BAD/INDOOR: "rain", "storm", "cloudy", "cold", "high precipitation"
 
-        - Query: "compare pricing", Data: "Product Y is an AI chatbot builder platform"
-        → "AI chatbot builder pricing comparison 2025"
+                COMPARISON QUERY RULES:
+                - Extract the category/technology from previous results (NOT brand names)
+                - Add "competitors" or "alternatives" or "comparison"
+                - Example: "customer support chatbot" → "customer support chatbot competitors 2025"
 
-        - Query: "compare features", Data: "Our CRM system for sales teams"
-        → "CRM sales teams features comparison 2025"
+                EXAMPLES:
 
-        Return ONLY the search query, nothing else. Keep it focused and under 10 words."""
+                Example 1 (Weather Conditional):
+                Query: "Check weather in Lucknow. If clear suggest outdoor events, else indoor events"
+                Previous: "Lucknow: 85°F, Sunny, 0% rain, Clear skies"
+                Analysis: Weather is CLEAR (sunny, 0% rain, 85°F) → User wants OUTDOOR
+                Output: outdoor events activities Lucknow 2025
+
+                Example 2 (Weather Conditional - Bad Weather):
+                Query: "Check weather in Lucknow. If clear suggest outdoor events, else indoor events"
+                Previous: "Lucknow: 65°F, Heavy rain, 90% precipitation"
+                Analysis: Weather is BAD (rain, 90% precipitation) → User wants INDOOR
+                Output: indoor events activities Lucknow 2025
+
+                Example 3 (Comparison):
+                Query: "compare competitors"
+                Previous: "Mochand is a customer support chatbot for WhatsApp"
+                Analysis: User wants competitors of customer support chatbots
+                Output: customer support chatbot WhatsApp competitors 2025
+
+                Example 4 (Product Info):
+                Query: "compare pricing"
+                Previous: "ProductX is an AI chatbot builder platform"
+                Analysis: User wants pricing comparison for AI chatbot builders
+                Output: AI chatbot builder pricing comparison 2025
+
+                YOUR TASK:
+                Generate the next search query based on the analysis above.
+                Return ONLY the search query (max 10 words). No explanations."""
         
         try:
-            logger.info(f" Calling middleware LLM...")
+            logger.info(f"🔄 Calling middleware LLM...")
+            with open("debug_middleware_prompt.txt", "w", encoding="utf8") as f:
+                f.write(middleware_prompt)
             response = await self.brain_llm.generate(
                 [{"role": "user", "content": middleware_prompt}],
-                temperature=0.2,
+                temperature=0.4,
                 max_tokens=100
             )
             

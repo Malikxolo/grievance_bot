@@ -808,7 +808,7 @@ def main():
                 
                 if agents_result["status"] == "error":
                     st.error(f"❌ Agent creation failed: {agents_result['error']}")
-                    logger.error(f"Agent creation failed: {agents_result['error']}")
+                    logger.error(f"Agent creation failed: {agents_result}")
                     if show_debug:
                         st.json(agents_result)
                 else:
