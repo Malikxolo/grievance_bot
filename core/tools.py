@@ -16,6 +16,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from abc import ABC, abstractmethod
 from .exceptions import ToolExecutionError
+from .quota_manager import QuotaManager
 from .llm_client import LLMClient
 from .web_search_agent import search_perplexity
 
@@ -195,14 +196,8 @@ class WebSearchTool(BaseTool):
         self.provider = provider
         self.web_model = web_model
         self.session = None
+        self.quota_manager = QuotaManager()
         
-        # Initialize quota manager
-        try:
-            from quota_manager import QuotaManager
-            self.quota_manager = QuotaManager()
-        except ImportError:
-            self.quota_manager = None
-            logger.warning("⚠️ QuotaManager not available, using basic provider selection")
         
         # Build available providers list (priority order)
         self.available_providers = []
@@ -427,7 +422,7 @@ class WebSearchTool(BaseTool):
             ]
             
             # Scrape top results
-            # scraped_count = await self._scrape_results(results, scrape_top)
+            scraped_count = await self._scrape_results(results, scrape_top)
             
             return {
                 "success": True,

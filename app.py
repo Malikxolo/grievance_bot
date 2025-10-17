@@ -320,17 +320,18 @@ def initialize_config():
         return {"status": "error", "error": str(e)}
 
 
-async def create_agents_async(config, agent_model_config, web_model_config, use_premium_search=False):
+async def create_agents_async(config, brain_agent_config, heart_agent_config, web_model_config, use_premium_search=False):
     """Create Optimized Agent with selected models"""
     try:
         # Create LLM clients (use same config for both brain and heart)
-        agent_llm = LLMClient(agent_model_config)
+        brain_llm = LLMClient(brain_agent_config)
+        heart_llm = LLMClient(heart_agent_config)
         
         # Create tool manager
-        tool_manager = ToolManager(config, agent_llm, web_model_config, use_premium_search)
+        tool_manager = ToolManager(config, brain_llm, web_model_config, use_premium_search)
         
         # Create optimized agent (uses same LLM for both brain and heart functions)
-        optimized_agent = OptimizedAgent(agent_llm, agent_llm, tool_manager)
+        optimized_agent = OptimizedAgent(brain_llm, heart_llm, tool_manager)
         
         return {
             "optimized_agent": optimized_agent,
@@ -342,8 +343,8 @@ async def create_agents_async(config, agent_model_config, web_model_config, use_
 
 
 
-def display_model_selector(config, agent_name: str):
-    """Display model selection interface"""
+def display_model_selector(config, agent_name: str, key_prefix: str):
+    """Display model selection interface with unique keys"""
     
     providers = config.get_available_providers()
     
@@ -353,7 +354,7 @@ def display_model_selector(config, agent_name: str):
         provider = st.selectbox(
             f"{agent_name} Provider:",
             providers,
-            key=f"{agent_name}_provider"
+            key=f"{key_prefix}_provider"
         )
     
     with col2:
@@ -361,7 +362,7 @@ def display_model_selector(config, agent_name: str):
         model = st.selectbox(
             f"{agent_name} Model:",
             models,
-            key=f"{agent_name}_model"
+            key=f"{key_prefix}_model"
         )
     
     return config.create_llm_config(provider, model)
@@ -536,14 +537,20 @@ def main():
             
         st.markdown("## 🎛️ Model Configuration")
         
-        # Show available providers
         available_providers = config.get_available_providers()
         st.success(f"✅ Available: {', '.join(available_providers)}")
         
-        # Optimized Agent Configuration
-        st.markdown("### 🚀 Optimized Agent")
-        st.caption("Combined orchestration and synthesis")
-        agent_model_config = display_model_selector(config, "Agent")
+        # 🆕 Brain Agent Configuration
+        st.markdown("### 🧠 Brain Agent")
+        st.caption("Analysis, planning, and orchestration")
+        brain_model_config = display_model_selector(config, "Brain", "brain")
+        
+        st.markdown("---")
+        
+        # 🆕 Heart Agent Configuration
+        st.markdown("### ❤️ Heart Agent")
+        st.caption("Response synthesis and communication")
+        heart_model_config = display_model_selector(config, "Heart", "heart")
 
         st.markdown("---")
 
@@ -792,11 +799,12 @@ def main():
     
     # Process query with REAL agents
     if submit_button and query.strip():
-        # Display model information
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"🚀 Agent: {agent_model_config.provider}/{agent_model_config.model}")
+            st.info(f"🧠 Brain: {brain_model_config.provider}/{brain_model_config.model}")
         with col2:
+            st.info(f"❤️ Heart: {heart_model_config.provider}/{heart_model_config.model}")
+        with col3:
             search_type = f"Premium: {web_model_config}" if use_premium_search else "Standard: ScrapingDog/ValueSerp"
             st.info(f"🌐 Web: {search_type}")
 
@@ -804,7 +812,7 @@ def main():
         with st.spinner("Creating agents and processing query..."):
             try:
                 # Run async agent creation and processing
-                agents_result = asyncio.run(create_agents_async(config, agent_model_config, web_model_config, use_premium_search))
+                agents_result = asyncio.run(create_agents_async(config, brain_model_config, heart_model_config, web_model_config, use_premium_search))
                 
                 if agents_result["status"] == "error":
                     st.error(f"❌ Agent creation failed: {agents_result['error']}")
