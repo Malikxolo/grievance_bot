@@ -309,7 +309,7 @@ def render_rag_sidebar():
         
         # Show file count
         try:
-            metadata_path = f"db_collection/{user_id}/{collection_name}/metadata.json"
+            metadata_path = f"db_collection/{user_id}/{collection_name}/knowledge_base_metadata.json"
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
@@ -317,13 +317,20 @@ def render_rag_sidebar():
         except Exception as e:
             logger.error(f"Error reading metadata: {e}")
             
+        if st.button("✏️ Edit Collection"):
+            st.session_state.show_edit = True
+            st.session_state.show_upload = False
+            
         if st.button("🔄 Replace Collection"):
             st.session_state.show_upload = True
+            st.session_state.show_edit = False
     else:
         st.info("No collection loaded")
         st.warning("RAG tool disabled")
         if st.button("📁 Create Collection"):
             st.session_state.show_upload = True
+            st.session_state.show_edit = False
+
 
 
 
@@ -827,7 +834,106 @@ def main():
                 
                 st.session_state.show_upload = False
                 st.rerun()
-    
+    # EDIT COLLECTION INTERFACE
+    if st.session_state.get('show_edit', False):
+        st.markdown("---")
+        st.markdown("## ✏️ Edit Collection")
+        
+        user_id = get_user_id()
+        collections = get_user_collections(user_id)
+        
+        if collections:
+            collection_name = collections[0]
+            
+            # Get metadata
+            try:
+                metadata_path = f"db_collection/{user_id}/{collection_name}/knowledge_base_metadata.json"
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                
+                file_names = metadata.get('file_names', [])
+                
+                if file_names:
+                    st.markdown(f"### 📄 Current Files ({len(file_names)})")
+                    
+                    # Display files with delete buttons
+                    for filename in file_names:
+                        col1, col2 = st.columns([4, 1])
+                        with col1:
+                            st.write(f"📄 {filename}")
+                        with col2:
+                            if st.button("🗑️", key=f"delete_{filename}"):
+                                with st.spinner(f"Deleting {filename}..."):
+                                    from core.knowledge_base import delete_file
+                                    result = delete_file(user_id, collection_name, filename)
+                                    
+                                    if result["success"]:
+                                        st.success(f"✅ Deleted {filename}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ Failed: {result.get('error')}")
+                else:
+                    st.warning("No files in collection")
+                
+            except Exception as e:
+                st.error(f"Error loading files: {e}")
+            
+            st.markdown("---")
+            st.markdown("### ➕ Add New Files")
+            
+            # Add files uploader
+            new_files = st.file_uploader(
+                "Upload files to add:",
+                type=[
+                    'txt', 'md', 'rtf', 'pdf', 'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'odt',
+                    'csv', 'tsv', 'json', 'xlsx', 'xls', 'xlsm', 'xlsb', 'xltx', 'xltm', 'ods',
+                    'ppt', 'pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm', 'odp',
+                    'mdb', 'accdb', 'html', 'htm', 'xml', 'msg', 'eml', 'epub'
+                ],
+                accept_multiple_files=True,
+                key="edit_file_uploader"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("➕ Add Files") and new_files:
+                    with st.spinner(f"Adding {len(new_files)} files..."):
+                        # Save uploaded files temporarily
+                        temp_paths = []
+                        for file in new_files:
+                            temp_path = file.name
+                            with open(temp_path, "wb") as f:
+                                f.write(file.getvalue())
+                            temp_paths.append(temp_path)
+                        
+                        try:
+                            from core.knowledge_base import add_files
+                            result = add_files(user_id, collection_name, temp_paths)
+                            
+                            if result["success"]:
+                                st.success(f"✅ Added {len(new_files)} files!")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Failed: {result.get('error')}")
+                        
+                        finally:
+                            # Cleanup temp files
+                            for temp_path in temp_paths:
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+            
+            with col2:
+                if st.button("✅ Done"):
+                    st.session_state.show_edit = False
+                    st.rerun()
+        
+        else:
+            st.error("No collection found")
+            if st.button("❌ Close"):
+                st.session_state.show_edit = False
+                st.rerun()
+                
+
     # Main interface
     st.markdown("## 🎯 Research Query")
     st.caption("The Brain Agent will analyze your query and dynamically select appropriate tools")

@@ -281,7 +281,7 @@ class OptimizedAgent:
         logger.info(f"   Chat History Length: {len(chat_history) if chat_history else 0}")
         
         # Build context from chat history
-        context = self._build_context(chat_history)
+        context = chat_history[-2:] if chat_history else []
         logger.info(f"   Built Context: '{context}'")
         
         
@@ -292,7 +292,8 @@ class OptimizedAgent:
 - Uses RAG + Web Search for intelligent responses
 - Serves businesses of all sizes needing to scale customer communication
 
-CONVERSATION CONTEXT: {memories}
+LONG-TERM CONTEXT (Memories): {memories}
+RECENT CONVERSATION: {context}
 USER QUERY: {query}
 
 AVAILABLE TOOLS:

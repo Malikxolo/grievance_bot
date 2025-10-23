@@ -10,6 +10,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dotenv import load_dotenv
+import uuid
 
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -204,7 +205,7 @@ class KnowledgeBaseManager:
                     doc = Document(
                         page_content=content,
                         metadata={
-                            "source": filename,
+                            "source": os.path.basename(file_path),
                             "file_type": file_extension,
                             "elements_count": len(elements)
                         }
@@ -215,6 +216,8 @@ class KnowledgeBaseManager:
                 elif file_extension == '.txt':
                     loader = UTF8TextLoader(file_path)
                     file_docs = loader.load()
+                    for doc in file_docs:
+                        doc.metadata["source"] = os.path.basename(file_path)
                     documents.extend(file_docs)
                     logger.info(f"Loaded text file: {filename}")
                     
@@ -222,6 +225,8 @@ class KnowledgeBaseManager:
                     if PDF_SUPPORT:
                         loader = PyPDFLoader(file_path)
                         file_docs = loader.load()
+                        for doc in file_docs:
+                            doc.metadata["source"] = os.path.basename(file_path)
                         documents.extend(file_docs)
                         logger.info(f"Loaded PDF: {filename} ({len(file_docs)} pages)")
                     else:
@@ -231,6 +236,8 @@ class KnowledgeBaseManager:
                     if DOCX_SUPPORT:
                         loader = UnstructuredWordDocumentLoader(file_path)
                         file_docs = loader.load()
+                        for doc in file_docs:
+                            doc.metadata["source"] = os.path.basename(file_path)
                         documents.extend(file_docs)
                         logger.info(f"Loaded Word document: {filename}")
                     else:
@@ -294,7 +301,7 @@ class KnowledgeBaseManager:
             # Extract content and metadata
             contents = [doc.page_content for doc in texts]
             metadatas = [doc.metadata for doc in texts]
-            ids = [f"doc_{i}" for i in range(len(texts))]
+            ids = [str(uuid.uuid4()) for _ in range(len(texts))]
             
             # Add documents to collection
             collection.add(
@@ -401,6 +408,188 @@ class KnowledgeBaseManager:
                 "results": []
             }
 
+    def delete_file_from_collection(
+        self, 
+        user_id: str, 
+        collection_name: str, 
+        filename: str
+    ) -> Dict[str, Any]:
+        """Delete all chunks from a specific file"""
+        try:
+            collection_path = os.path.join(self.base_path, user_id, collection_name)
+            chroma_db_path = os.path.join(collection_path, "chroma_db")
+            
+            db = self._get_chroma_client(path=chroma_db_path)
+            namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
+            collection = db.get_collection(name=namespaced_name)
+            
+            count_before = collection.count()
+            
+            # Get items to delete and delete by IDs
+            items_to_delete = collection.get(where={"source": filename})
+            if items_to_delete['ids']:
+                collection.delete(ids=items_to_delete['ids'])
+            
+            count_after = collection.count()
+            deleted_chunks = count_before - count_after
+            
+            logger.info(f"Deleted {deleted_chunks} chunks from file '{filename}'")
+            
+            self._update_metadata_after_deletion(collection_path, filename, deleted_chunks)
+            
+            return {
+                "success": True,
+                "deleted_file": filename,
+                "deleted_chunks": deleted_chunks,
+                "remaining_chunks": count_after
+            }
+            
+        except Exception as e:
+            logger.error(f"Error deleting file {filename}: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to delete file: {str(e)}"
+            }
+
+    def add_files_to_collection(
+        self, 
+        user_id: str, 
+        collection_name: str, 
+        file_paths: List[str]
+    ) -> Dict[str, Any]:
+        """Add new files to EXISTING collection"""
+        try:
+            logger.info(f"Adding {len(file_paths)} files to collection {collection_name}")
+            
+            collection_path = os.path.join(self.base_path, user_id, collection_name)
+            chroma_db_path = os.path.join(collection_path, "chroma_db")
+            
+            # Check for duplicates
+            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
+            if os.path.exists(metadata_file):
+                import json
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                
+                existing_files = set(metadata.get("file_names", []))
+                new_file_names = [os.path.basename(fp) for fp in file_paths]
+                duplicates = [f for f in new_file_names if f in existing_files]
+                
+                if duplicates:
+                    logger.warning(f"⚠️ Duplicate files detected: {duplicates}")
+                    return {
+                        "success": False,
+                        "error": f"Files already exist: {', '.join(duplicates)}"
+                    }
+            
+            # Load and process new files
+            documents = self._load_documents_from_files(file_paths, collection_path)
+            
+            if not documents:
+                return {
+                    "success": False,
+                    "error": "No documents could be loaded"
+                }
+            
+            logger.info(f"Loaded {len(documents)} documents")
+            
+            # Split into chunks
+            texts = self._split_documents(documents)
+            logger.info(f"Split new files into {len(texts)} chunks")
+            
+            # Get existing collection
+            db = self._get_chroma_client(path=chroma_db_path)
+            namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
+            collection = db.get_collection(name=namespaced_name)
+            
+            # Get current count
+            current_count = collection.count()
+            logger.info(f"Current collection has {current_count} chunks")
+            
+            # Prepare new data
+            contents = [doc.page_content for doc in texts]
+            metadatas = [doc.metadata for doc in texts]
+            ids = [str(uuid.uuid4()) for _ in range(len(texts))]
+            
+            # Add to EXISTING collection
+            collection.add(
+                documents=contents,
+                metadatas=metadatas,
+                ids=ids
+            )
+            
+            new_count = current_count + len(texts)
+            
+            # Update metadata JSON
+            file_names = [os.path.basename(fp) for fp in file_paths]
+            self._update_metadata_after_addition(collection_path, file_names, len(documents), len(texts))
+            
+            return {
+                "success": True,
+                "added_files": file_names,
+                "added_chunks": len(texts),
+                "total_chunks": new_count
+            }
+            
+        except Exception as e:
+            logger.error(f"Error adding files: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to add files: {str(e)}"
+            }
+
+    def _update_metadata_after_deletion(self, collection_path: str, deleted_filename: str, deleted_chunks: int):
+        """Update metadata JSON after file deletion"""
+        try:
+            import json
+            from datetime import datetime
+            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
+            
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                
+                # Update file list and counts
+                if deleted_filename in metadata.get("file_names", []):
+                    metadata["file_names"].remove(deleted_filename)
+                    metadata["file_count"] = len(metadata["file_names"])
+                
+                metadata["chunk_count"] = metadata.get("chunk_count", 0) - deleted_chunks
+                metadata["last_modified"] = datetime.now().isoformat()
+                
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                logger.info(f"Updated metadata after deletion")
+        except Exception as e:
+            logger.warning(f"Could not update metadata: {e}")
+
+    def _update_metadata_after_addition(self, collection_path: str, new_filenames: List[str], doc_count: int, chunk_count: int):
+        """Update metadata JSON after adding files"""
+        try:
+            import json
+            from datetime import datetime
+            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
+            
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                
+                # Update file list and counts
+                existing_files = metadata.get("file_names", [])
+                metadata["file_names"] = existing_files + new_filenames
+                metadata["file_count"] = len(metadata["file_names"])
+                metadata["document_count"] = metadata.get("document_count", 0) + doc_count
+                metadata["chunk_count"] = metadata.get("chunk_count", 0) + chunk_count
+                metadata["last_modified"] = datetime.now().isoformat()
+                
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                logger.info(f"Updated metadata after addition")
+        except Exception as e:
+            logger.warning(f"Could not update metadata: {e}")
+
 # Initialize global knowledge base manager
 kb_manager = KnowledgeBaseManager()
 
@@ -433,3 +622,12 @@ def get_display_collection_name(user_id: str, namespaced_name: str) -> str:
     if namespaced_name.startswith(prefix):
         return namespaced_name[len(prefix):]
     return namespaced_name
+
+def delete_file(user_id: str, collection_name: str, filename: str) -> Dict[str, Any]:
+    """Convenience function for deleting a file"""
+    return kb_manager.delete_file_from_collection(user_id, collection_name, filename)
+
+
+def add_files(user_id: str, collection_name: str, file_paths: List[str]) -> Dict[str, Any]:
+    """Convenience function for adding files to existing collection"""
+    return kb_manager.add_files_to_collection(user_id, collection_name, file_paths)
