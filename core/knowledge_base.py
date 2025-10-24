@@ -1,34 +1,32 @@
 """
-Knowledge Base Creation - Adapted for Brain-Heart Deep Research System
-User-specific vector database creation using ChromaDB + LangChain
-ENHANCED: PDF + DOCX Support + Chroma Cloud Support + Multi-User Isolation
-SECURITY: Path sanitization to prevent directory traversal attacks
+Knowledge Base Creation - Database-Driven Approach
+Stores metadata in MongoDB, vectors in ChromaDB (no folder structure)
+ENHANCED: PDF + DOCX Support + Multi-User Isolation
+SECURITY: Input sanitization to prevent injection attacks
+FIXED: PyMongo boolean check errors
 """
 
 import os
-import shutil
 import logging
 from typing import List, Dict, Any, Optional
-from pathlib import Path
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import uuid
+import tempfile
+import shutil
 
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
 
-# Import path security utilities
-from core.path_security import (
-    sanitize_path_component,
-    create_safe_user_path,
-    validate_safe_path,
-    sanitize_filename
-)
+# MongoDB for metadata storage
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
+from redis.asyncio import Redis
 
-# Multi-format document loaders with graceful fallback
+# Multi-format document loaders
 try:
     from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
     PDF_SUPPORT = True
@@ -50,36 +48,112 @@ class UTF8TextLoader(TextLoader):
         super().__init__(file_path, encoding='utf-8', **kwargs)
 
 class KnowledgeBaseManager:
-    """Manages user-specific knowledge base creation following Brain-Heart patterns"""
+    """Manages user-specific knowledge base creation with database storage"""
     
-    def __init__(self, base_path: str = "db_collection"):
-        self.base_path = base_path
+    def __init__(self, 
+                 chroma_host: str = None,
+                 chroma_port: int = 8000,
+                 mongo_uri: str = None,
+                 mongo_db_name: str = "knowledge_base"):
+        """
+        Initialize with database connections
+        
+        Args:
+            chroma_host: ChromaDB host (if None, uses in-memory)
+            chroma_port: ChromaDB port
+            mongo_uri: MongoDB connection URI
+            mongo_db_name: MongoDB database name
+        """
         self.embeddings_model = "text-embedding-3-small"
         self.chunk_size = 1000
         self.chunk_overlap = 100
         
-        logger.info("KnowledgeBaseManager initialized")
+        # Setup ChromaDB client
+        self.chroma_client = self._setup_chroma_client(chroma_host, chroma_port)
+        
+        # Setup MongoDB client for metadata
+        self.mongo_client, self.mongo_db = self._setup_mongo_client(mongo_uri, mongo_db_name)
+        
+        self.mongo_available = self.mongo_db is not None
+        
+        self.redis_client = Redis(
+            host=os.getenv('REDIS_HOST'), 
+            port=os.getenv('REDIS_PORT'), 
+            decode_responses=os.getenv('REDIS_DECODE_RESPONSES'), 
+            username=os.getenv('REDIS_USERNAME'), 
+            password=os.getenv('REDIS_PASSWORD')
+        )
+        
+        logger.info("KnowledgeBaseManager initialized with database storage")
         if PDF_SUPPORT:
             logger.info("PDF support available")
         if DOCX_SUPPORT:
             logger.info("DOCX support available")
     
-    def _get_chroma_client(self, path: str = None):
-        """Get ChromaDB client - Cloud if API key exists, else local"""
-        if os.getenv('CHROMA_API_KEY'):
-            logger.info("Using Chroma Cloud client")
-            return chromadb.CloudClient(
-                api_key=os.getenv('CHROMA_API_KEY'),
-                tenant=os.getenv('CHROMA_TENANT'), 
-                database=os.getenv('CHROMA_DATABASE')
-            )
-        else:
-            logger.info(f"Using local ChromaDB client: {path}")
-            return chromadb.PersistentClient(path=path)
+    def _setup_chroma_client(self, host: str = None, port: int = 8000):
+        """Setup ChromaDB client"""
+        try:
+            if host or os.getenv('CHROMA_HOST'):
+                # Use hosted ChromaDB
+                actual_host = host or os.getenv('CHROMA_HOST')
+                actual_port = port or int(os.getenv('CHROMA_PORT', 8000))
+                logger.info(f"Using ChromaDB server: {actual_host}:{actual_port}")
+                return chromadb.HttpClient(host=actual_host, port=actual_port)
+            else:
+                
+                logger.info("Using local ChromaDB (disk persistence)")
+                return chromadb.PersistentClient()
+        except Exception as e:
+            logger.error(f"Failed to setup ChromaDB: {e}")
+            raise
+        
+    def _set_active_collection(self, collection_name: str, user_id: str):
+        """Set active ChromaDB collection for user"""
+        namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
+        return self.redis_client.set(f"user:{user_id}:active_collection", namespaced_name)
+    
+    def _get_active_collection(self, user_id: str) -> Optional[str]:
+        """Get active ChromaDB collection for user"""
+        return self.redis_client.get(f"user:{user_id}:active_collection")
+    
+    def _setup_mongo_client(self, uri: str = None, db_name: str = "knowledge_base"):
+        """Setup MongoDB client for metadata storage"""
+        try:
+            mongo_uri = uri or os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            
+            # Test connection
+            client.admin.command('ping')
+            db = client[db_name]
+            
+            # Create indexes for efficient queries
+            db.collections.create_index([("user_id", 1), ("collection_name", 1)], unique=True)
+            db.collections.create_index([("user_id", 1)])
+            db.collections.create_index([("created_at", -1)])
+            
+            logger.info(f"Connected to MongoDB: {mongo_uri}")
+            return client, db
+            
+        except ConnectionFailure as e:
+            logger.warning(f"MongoDB connection failed: {e}. Metadata storage disabled.")
+            return None, None
+        except Exception as e:
+            logger.warning(f"MongoDB setup failed: {e}. Metadata storage disabled.")
+            return None, None
+    
+    def _sanitize_collection_name(self, name: str) -> str:
+        """Sanitize collection name to prevent injection"""
+        # Remove dangerous characters, keep alphanumeric, underscore, hyphen
+        import re
+        sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+        # Limit length
+        return sanitized[:100]
     
     def _get_namespaced_collection_name(self, user_id: str, collection_name: str) -> str:
-        """Create user-namespaced collection name to prevent cross-user contamination"""
-        return f"{user_id}_{collection_name}"
+        """Create user-namespaced collection name"""
+        safe_user_id = self._sanitize_collection_name(user_id)
+        safe_collection = self._sanitize_collection_name(collection_name)
+        return f"{safe_user_id}_{safe_collection}"
     
     def create_user_knowledge_base(
         self, 
@@ -91,25 +165,28 @@ class KnowledgeBaseManager:
         try:
             logger.info(f"Starting knowledge base creation for user {user_id}, collection: {collection_name}")
             
-            # SECURITY: Sanitize user inputs to prevent directory traversal
-            safe_user_id = sanitize_path_component(user_id)
-            safe_collection_name = sanitize_path_component(collection_name)
+            # Sanitize inputs
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
             
-            # Extract file names from file paths
-            file_names = [os.path.basename(file_path) for file_path in file_paths]
+            # Extract file names
+            file_names = [os.path.basename(fp) for fp in file_paths]
             
-            # 1. Setup user-specific paths with security validation
-            user_path = create_safe_user_path(self.base_path, safe_user_id)
-            collection_path = create_safe_user_path(self.base_path, safe_user_id, safe_collection_name)
-            chroma_db_path = validate_safe_path(collection_path, "chroma_db")
+            # Check if collection already exists
+            if self.mongo_available:  # FIXED: Use boolean flag
+                existing = self.mongo_db.collections.find_one({
+                    "user_id": safe_user_id,
+                    "collection_name": safe_collection_name
+                })
+                if existing is not None:  # FIXED: Compare with None
+                    return {
+                        "success": False,
+                        "error": f"Collection '{safe_collection_name}' already exists"
+                    }
             
-            # Ensure directories exist
-            os.makedirs(chroma_db_path, exist_ok=True)
-            logger.info(f"Created directories: {chroma_db_path}")
-            
-            # 2. Load documents from uploaded files
+            # Load documents from uploaded files
             logger.info(f"Loading {len(file_paths)} documents...")
-            documents = self._load_documents_from_files(file_paths, collection_path)
+            documents = self._load_documents_from_files(file_paths)
             
             if not documents:
                 return {
@@ -123,17 +200,17 @@ class KnowledgeBaseManager:
             
             logger.info(f"Successfully loaded {len(documents)} documents")
             
-            # 3. Split documents into chunks
+            # Split documents into chunks
             logger.info("Splitting documents into chunks...")
             texts = self._split_documents(documents)
             logger.info(f"Split into {len(texts)} chunks")
             
-            # 4. Create embeddings and vector store
+            # Create embeddings and vector store
             logger.info("Creating embeddings and ChromaDB vector store...")
-            result = self._create_vector_store(texts, chroma_db_path, safe_collection_name, safe_user_id)
-            
+            result = self._create_vector_store(texts, safe_user_id, safe_collection_name)
+            self._set_active_collection(safe_collection_name, safe_user_id)
             if result["success"]:
-                # 5. Store metadata
+                # Store metadata in MongoDB
                 metadata = {
                     "user_id": safe_user_id,
                     "collection_name": safe_collection_name,
@@ -145,11 +222,11 @@ class KnowledgeBaseManager:
                     "embedding_model": self.embeddings_model,
                     "chunk_size": self.chunk_size,
                     "chunk_overlap": self.chunk_overlap,
-                    "created_at": result["created_at"],
-                    "chroma_db_path": chroma_db_path
+                    "created_at": datetime.now(timezone.utc),
+                    "last_modified": datetime.now(timezone.utc)
                 }
                 
-                self._save_metadata(collection_path, metadata)
+                self._save_metadata(metadata)
                 
                 logger.info(f"Knowledge base created successfully: {safe_collection_name}")
                 return {
@@ -160,25 +237,48 @@ class KnowledgeBaseManager:
             else:
                 return result
                 
-        except ValueError as ve:
-            # Security validation error
-            logger.error(f"Security validation failed: {ve}")
-            return {
-                "success": False,
-                "error": f"Invalid input: {str(ve)}"
-            }
         except Exception as e:
-            logger.error(f"Failed to create knowledge base: {e}")
+            logger.error(f"Failed to create knowledge base: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": f"Knowledge base creation failed: {str(e)}"
             }
+            
+    def delete_knowledge_base(self, user_id: str, collection_name: str) -> Dict[str, Any]:
+        """Delete entire user-specific knowledge base"""
+        try:
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
+            
+            # Delete from ChromaDB
+            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
+            self._delete_vector_store(namespaced_name)
+            
+            # Delete from MongoDB
+            if self.mongo_available:  # FIXED: Use boolean flag
+                result = self.mongo_db.collections.delete_one({
+                    "user_id": safe_user_id,
+                    "collection_name": safe_collection_name
+                })
+                logger.info(f"Deleted metadata: {result.deleted_count} document(s)")
+            
+            return {
+                "success": True,
+                "message": f"Knowledge base '{safe_collection_name}' deleted successfully"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error deleting knowledge base: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to delete knowledge base: {str(e)}"
+            }
     
-    def _load_documents_from_files(self, file_paths: List[str], collection_path: str) -> List:
-        """Load documents from uploaded files - ENHANCED with comprehensive format support"""
+    def _load_documents_from_files(self, file_paths: List[str]) -> List[Document]:
+        """Load documents from uploaded files"""
         documents = []
         
-        # Import unstructured for comprehensive format support
+        # Try to import unstructured for comprehensive format support
         try:
             from unstructured.partition.auto import partition
             UNSTRUCTURED_AVAILABLE = True
@@ -198,25 +298,14 @@ class KnowledgeBaseManager:
             logger.info(f"Processing file: {filename} (type: {file_extension})")
             
             try:
-                # Use unstructured for ALL supported formats
+                # Use unstructured for comprehensive format support
                 if UNSTRUCTURED_AVAILABLE and file_extension in [
-                    # Text & Document formats
-                    '.md', '.rtf',
-                    # Data formats 
-                    '.csv', '.tsv', '.json',
-                    # Excel formats
+                    '.md', '.rtf', '.csv', '.tsv', '.json',
                     '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm',
-                    # Word formats (handled by unstructured)
                     '.docm', '.dotx', '.dotm', '.dot',
-                    # PowerPoint formats
                     '.ppt', '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm',
-                    # Web & Markup formats  
                     '.html', '.htm', '.xml',
-                    # OpenDocument formats
                     '.odt', '.ods', '.odp',
-                    # Database formats
-                    '.mdb', '.accdb',
-                    # Communication formats
                     '.epub', '.msg', '.eml'
                 ]:
                     elements = partition(filename=file_path)
@@ -225,7 +314,7 @@ class KnowledgeBaseManager:
                     doc = Document(
                         page_content=content,
                         metadata={
-                            "source": os.path.basename(file_path),
+                            "source": filename,
                             "file_type": file_extension,
                             "elements_count": len(elements)
                         }
@@ -237,7 +326,7 @@ class KnowledgeBaseManager:
                     loader = UTF8TextLoader(file_path)
                     file_docs = loader.load()
                     for doc in file_docs:
-                        doc.metadata["source"] = os.path.basename(file_path)
+                        doc.metadata["source"] = filename
                     documents.extend(file_docs)
                     logger.info(f"Loaded text file: {filename}")
                     
@@ -246,7 +335,7 @@ class KnowledgeBaseManager:
                         loader = PyPDFLoader(file_path)
                         file_docs = loader.load()
                         for doc in file_docs:
-                            doc.metadata["source"] = os.path.basename(file_path)
+                            doc.metadata["source"] = filename
                         documents.extend(file_docs)
                         logger.info(f"Loaded PDF: {filename} ({len(file_docs)} pages)")
                     else:
@@ -257,7 +346,7 @@ class KnowledgeBaseManager:
                         loader = UnstructuredWordDocumentLoader(file_path)
                         file_docs = loader.load()
                         for doc in file_docs:
-                            doc.metadata["source"] = os.path.basename(file_path)
+                            doc.metadata["source"] = filename
                         documents.extend(file_docs)
                         logger.info(f"Loaded Word document: {filename}")
                     else:
@@ -273,124 +362,140 @@ class KnowledgeBaseManager:
                 encryption_keywords = [
                     'encrypt', 'password', 'decrypt', 'protected', 
                     'badzipfile', 'pdfdecryptionerror', 'pdfreadeerror',
-                    'bad magic number', 'file is encrypted', 'bad password',
-                    'document is password protected', 'file has not been decrypted'
+                    'bad magic number', 'file is encrypted', 'bad password'
                 ]
                 
                 if any(keyword in error_msg for keyword in encryption_keywords):
-                    logger.error(f"❌ ENCRYPTED FILE: '{filename}' is password-protected or encrypted. Please provide an unprotected version.")
+                    logger.error(f"❌ ENCRYPTED FILE: '{filename}' is password-protected")
                 else:
                     logger.error(f"Error processing file {filename}: {e}")
                 
                 continue
         
-        logger.info(f"Successfully processed {len(documents)} documents from {len(file_paths)} files")
         return documents
 
-
-    def _split_documents(self, documents: List) -> List:
-        """Split documents into chunks using your existing approach"""
+    def _split_documents(self, documents: List[Document]) -> List[Document]:
+        """Split documents into chunks"""
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size, 
             chunk_overlap=self.chunk_overlap
         )
-        texts = text_splitter.split_documents(documents)
-        return texts
+        return text_splitter.split_documents(documents)
     
-    def _create_vector_store(self, texts: List, chroma_db_path: str, collection_name: str, user_id: str) -> Dict[str, Any]:
-        """Create ChromaDB vector store with user isolation"""
+    def _delete_vector_store(self, collection_name: str):
+        """Delete ChromaDB collection"""
+        try:
+            existing_collections = [c.name for c in self.chroma_client.list_collections()]
+            if collection_name in existing_collections:
+                self.chroma_client.delete_collection(name=collection_name)
+                logger.info(f"Deleted collection: {collection_name}")
+        except Exception as e:
+            logger.error(f"Error deleting vector store: {e}")
+    
+    def _create_vector_store(self, texts: List[Document], user_id: str, collection_name: str) -> Dict[str, Any]:
+        """Create ChromaDB vector store"""
         try:
             # Create embeddings
-            embeddings = OpenAIEmbeddings(model=self.embeddings_model, openai_api_key=os.getenv('OPENAI_API_KEY'))
-            logger.info(f"Created embeddings model: {self.embeddings_model}")
+            embeddings = OpenAIEmbeddings(
+                model=self.embeddings_model, 
+                openai_api_key=os.getenv('OPENAI_API_KEY')
+            )
             
-            # Use smart client selection
-            db = self._get_chroma_client(path=chroma_db_path)
-            
-            # Create namespaced collection name for user isolation
+            # Create namespaced collection name
             namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
             
-            # Clean up existing user collection (only affects this user's data)
-            if namespaced_name in [c.name for c in db.list_collections()]:
-                db.delete_collection(name=namespaced_name)
-                logger.info(f"Deleted existing user collection: {namespaced_name}")
+            # Clean up existing collection
+            self._delete_vector_store(namespaced_name)
             
-            # Create new namespaced collection
-            collection = db.get_or_create_collection(name=namespaced_name)
+            # Create new collection
+            collection = self.chroma_client.get_or_create_collection(name=namespaced_name)
             
-            # Extract content and metadata
+            # Generate embeddings for all texts
             contents = [doc.page_content for doc in texts]
             metadatas = [doc.metadata for doc in texts]
+            
+            # Create embeddings
+            embeddings_list = embeddings.embed_documents(contents)
+            
+            # Generate IDs
             ids = [str(uuid.uuid4()) for _ in range(len(texts))]
             
-            # Add documents to collection
+            # Add to collection
             collection.add(
                 documents=contents,
                 metadatas=metadatas,
+                embeddings=embeddings_list,
                 ids=ids
             )
             
-            # Verify collection
+            # Verify
             count = collection.count()
             logger.info(f"Vector store created: {count} entries in collection '{namespaced_name}'")
             
             return {
                 "success": True,
                 "collection_count": count,
-                "created_at": self._get_timestamp()
+                "created_at": datetime.utcnow().isoformat()
             }
             
         except Exception as e:
-            logger.error(f"Error creating vector store: {e}")
+            logger.error(f"Error creating vector store: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": f"Vector store creation failed: {str(e)}"
             }
     
-    def _save_metadata(self, collection_path: str, metadata: Dict[str, Any]):
-        """Save collection metadata"""
-        import json
-        from datetime import datetime
+    def _save_metadata(self, metadata: Dict[str, Any]):
+        """Save metadata to MongoDB"""
+        if not self.mongo_available:  # FIXED: Use boolean flag
+            logger.warning("MongoDB not available, metadata not saved")
+            return
         
-        metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
-        
-        # Add creation timestamp
-        metadata["kb_created_at"] = datetime.now().isoformat()
-        
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        logger.info(f"Metadata saved: {metadata_file}")
-    
-    def _get_timestamp(self) -> str:
-        """Get current timestamp"""
-        from datetime import datetime
-        return datetime.now().isoformat()
+        try:
+            self.mongo_db.collections.insert_one(metadata)
+            logger.info(f"Metadata saved for collection: {metadata['collection_name']}")
+        except Exception as e:
+            logger.error(f"Failed to save metadata: {e}")
     
     def get_collection_info(self, user_id: str, collection_name: str) -> Optional[Dict[str, Any]]:
         """Get information about user's collection"""
+        if not self.mongo_available:  # FIXED: Use boolean flag
+            return None
+        
         try:
-            # SECURITY: Sanitize inputs
-            safe_user_id = sanitize_path_component(user_id)
-            safe_collection_name = sanitize_path_component(collection_name)
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
             
-            collection_path = create_safe_user_path(self.base_path, safe_user_id, safe_collection_name)
-            metadata_file = validate_safe_path(collection_path, "knowledge_base_metadata.json")
+            metadata = self.mongo_db.collections.find_one({
+                "user_id": safe_user_id,
+                "collection_name": safe_collection_name
+            }, {"_id": 0})
             
-            if os.path.exists(metadata_file):
-                import json
-                with open(metadata_file, 'r') as f:
-                    metadata = json.load(f)
-                return metadata
+            return metadata
             
-            return None
-            
-        except ValueError as ve:
-            logger.error(f"Security validation failed: {ve}")
-            return None
         except Exception as e:
             logger.error(f"Error getting collection info: {e}")
             return None
+    
+    def get_user_collections(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get list of user's collections with metadata"""
+        if not self.mongo_available:  # FIXED: Use boolean flag
+            return []
+        
+        try:
+            safe_user_id = self._sanitize_collection_name(user_id)
+            
+            collections = list(self.mongo_db.collections.find(
+                {"user_id": safe_user_id},
+                {"_id": 0}
+            ).sort("created_at", -1))
+            
+            logger.info(f"Found {len(collections)} collections for user {safe_user_id}")
+            return collections
+            
+        except Exception as e:
+            logger.error(f"Error getting collections: {e}")
+            return []
     
     def query_collection(
         self, 
@@ -399,29 +504,29 @@ class KnowledgeBaseManager:
         query: str, 
         n_results: int = 5
     ) -> Dict[str, Any]:
-        """Query user's knowledge base collection with user isolation"""
+        """Query user's knowledge base collection"""
         try:
-            # SECURITY: Sanitize inputs
-            safe_user_id = sanitize_path_component(user_id)
-            safe_collection_name = sanitize_path_component(collection_name)
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
             
-            collection_path = create_safe_user_path(self.base_path, safe_user_id, safe_collection_name)
-            chroma_db_path = validate_safe_path(collection_path, "chroma_db")
-            
-            # Use smart client selection
-            db = self._get_chroma_client(path=chroma_db_path)
-            
-            # Use namespaced collection name for user isolation
+            # Get namespaced collection
             namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
-            collection = db.get_collection(name=namespaced_name)
+            collection = self.chroma_client.get_collection(name=namespaced_name)
+            
+            # Create query embedding
+            embeddings = OpenAIEmbeddings(
+                model=self.embeddings_model,
+                openai_api_key=os.getenv('OPENAI_API_KEY')
+            )
+            query_embedding = embeddings.embed_query(query)
             
             # Perform query
             results = collection.query(
-                query_texts=[query],
+                query_embeddings=[query_embedding],
                 n_results=n_results
             )
             
-            logger.info(f"Query executed for user {safe_user_id}, collection {safe_collection_name}: {len(results['documents'][0])} results")
+            logger.info(f"Query executed: {len(results['documents'][0])} results")
             
             return {
                 "success": True,
@@ -431,13 +536,6 @@ class KnowledgeBaseManager:
                 "distances": results['distances'][0] if results['distances'] else []
             }
             
-        except ValueError as ve:
-            logger.error(f"Security validation failed: {ve}")
-            return {
-                "success": False,
-                "error": f"Invalid input: {str(ve)}",
-                "results": []
-            }
         except Exception as e:
             logger.error(f"Error querying collection: {e}")
             return {
@@ -454,16 +552,15 @@ class KnowledgeBaseManager:
     ) -> Dict[str, Any]:
         """Delete all chunks from a specific file"""
         try:
-            collection_path = os.path.join(self.base_path, user_id, collection_name)
-            chroma_db_path = os.path.join(collection_path, "chroma_db")
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
             
-            db = self._get_chroma_client(path=chroma_db_path)
-            namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
-            collection = db.get_collection(name=namespaced_name)
+            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
+            collection = self.chroma_client.get_collection(name=namespaced_name)
             
             count_before = collection.count()
             
-            # Get items to delete and delete by IDs
+            # Get and delete items
             items_to_delete = collection.get(where={"source": filename})
             if items_to_delete['ids']:
                 collection.delete(ids=items_to_delete['ids'])
@@ -471,9 +568,21 @@ class KnowledgeBaseManager:
             count_after = collection.count()
             deleted_chunks = count_before - count_after
             
-            logger.info(f"Deleted {deleted_chunks} chunks from file '{filename}'")
+            # Update MongoDB metadata
+            if self.mongo_available:  # FIXED: Use boolean flag
+                self.mongo_db.collections.update_one(
+                    {"user_id": safe_user_id, "collection_name": safe_collection_name},
+                    {
+                        "$pull": {"file_names": filename},
+                        "$inc": {
+                            "file_count": -1,
+                            "chunk_count": -deleted_chunks
+                        },
+                        "$set": {"last_modified": datetime.utcnow()}
+                    }
+                )
             
-            self._update_metadata_after_deletion(collection_path, filename, deleted_chunks)
+            logger.info(f"Deleted {deleted_chunks} chunks from file '{filename}'")
             
             return {
                 "success": True,
@@ -483,7 +592,7 @@ class KnowledgeBaseManager:
             }
             
         except Exception as e:
-            logger.error(f"Error deleting file {filename}: {e}")
+            logger.error(f"Error deleting file: {e}")
             return {
                 "success": False,
                 "error": f"Failed to delete file: {str(e)}"
@@ -495,33 +604,31 @@ class KnowledgeBaseManager:
         collection_name: str, 
         file_paths: List[str]
     ) -> Dict[str, Any]:
-        """Add new files to EXISTING collection"""
+        """Add new files to existing collection"""
         try:
-            logger.info(f"Adding {len(file_paths)} files to collection {collection_name}")
-            
-            collection_path = os.path.join(self.base_path, user_id, collection_name)
-            chroma_db_path = os.path.join(collection_path, "chroma_db")
+            safe_user_id = self._sanitize_collection_name(user_id)
+            safe_collection_name = self._sanitize_collection_name(collection_name)
             
             # Check for duplicates
-            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
-            if os.path.exists(metadata_file):
-                import json
-                with open(metadata_file, 'r') as f:
-                    metadata = json.load(f)
+            if self.mongo_available:  # FIXED: Use boolean flag
+                existing_metadata = self.mongo_db.collections.find_one({
+                    "user_id": safe_user_id,
+                    "collection_name": safe_collection_name
+                })
                 
-                existing_files = set(metadata.get("file_names", []))
-                new_file_names = [os.path.basename(fp) for fp in file_paths]
-                duplicates = [f for f in new_file_names if f in existing_files]
-                
-                if duplicates:
-                    logger.warning(f"⚠️ Duplicate files detected: {duplicates}")
-                    return {
-                        "success": False,
-                        "error": f"Files already exist: {', '.join(duplicates)}"
-                    }
+                if existing_metadata is not None:  # FIXED: Compare with None
+                    existing_files = set(existing_metadata.get("file_names", []))
+                    new_file_names = [os.path.basename(fp) for fp in file_paths]
+                    duplicates = [f for f in new_file_names if f in existing_files]
+                    
+                    if duplicates:
+                        return {
+                            "success": False,
+                            "error": f"Files already exist: {', '.join(duplicates)}"
+                        }
             
             # Load and process new files
-            documents = self._load_documents_from_files(file_paths, collection_path)
+            documents = self._load_documents_from_files(file_paths)
             
             if not documents:
                 return {
@@ -529,44 +636,55 @@ class KnowledgeBaseManager:
                     "error": "No documents could be loaded"
                 }
             
-            logger.info(f"Loaded {len(documents)} documents")
-            
             # Split into chunks
             texts = self._split_documents(documents)
-            logger.info(f"Split new files into {len(texts)} chunks")
             
             # Get existing collection
-            db = self._get_chroma_client(path=chroma_db_path)
-            namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
-            collection = db.get_collection(name=namespaced_name)
+            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
+            collection = self.chroma_client.get_collection(name=namespaced_name)
             
-            # Get current count
             current_count = collection.count()
-            logger.info(f"Current collection has {current_count} chunks")
             
-            # Prepare new data
+            # Create embeddings
+            embeddings = OpenAIEmbeddings(
+                model=self.embeddings_model,
+                openai_api_key=os.getenv('OPENAI_API_KEY')
+            )
+            
             contents = [doc.page_content for doc in texts]
             metadatas = [doc.metadata for doc in texts]
+            embeddings_list = embeddings.embed_documents(contents)
             ids = [str(uuid.uuid4()) for _ in range(len(texts))]
             
-            # Add to EXISTING collection
+            # Add to collection
             collection.add(
                 documents=contents,
                 metadatas=metadatas,
+                embeddings=embeddings_list,
                 ids=ids
             )
             
-            new_count = current_count + len(texts)
-            
-            # Update metadata JSON
+            # Update MongoDB metadata
             file_names = [os.path.basename(fp) for fp in file_paths]
-            self._update_metadata_after_addition(collection_path, file_names, len(documents), len(texts))
+            if self.mongo_available:  # FIXED: Use boolean flag
+                self.mongo_db.collections.update_one(
+                    {"user_id": safe_user_id, "collection_name": safe_collection_name},
+                    {
+                        "$push": {"file_names": {"$each": file_names}},
+                        "$inc": {
+                            "file_count": len(file_names),
+                            "document_count": len(documents),
+                            "chunk_count": len(texts)
+                        },
+                        "$set": {"last_modified": datetime.utcnow()}
+                    }
+                )
             
             return {
                 "success": True,
                 "added_files": file_names,
                 "added_chunks": len(texts),
-                "total_chunks": new_count
+                "total_chunks": current_count + len(texts)
             }
             
         except Exception as e:
@@ -576,102 +694,37 @@ class KnowledgeBaseManager:
                 "error": f"Failed to add files: {str(e)}"
             }
 
-    def _update_metadata_after_deletion(self, collection_path: str, deleted_filename: str, deleted_chunks: int):
-        """Update metadata JSON after file deletion"""
-        try:
-            import json
-            from datetime import datetime
-            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
-            
-            if os.path.exists(metadata_file):
-                with open(metadata_file, 'r') as f:
-                    metadata = json.load(f)
-                
-                # Update file list and counts
-                if deleted_filename in metadata.get("file_names", []):
-                    metadata["file_names"].remove(deleted_filename)
-                    metadata["file_count"] = len(metadata["file_names"])
-                
-                metadata["chunk_count"] = metadata.get("chunk_count", 0) - deleted_chunks
-                metadata["last_modified"] = datetime.now().isoformat()
-                
-                with open(metadata_file, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                
-                logger.info(f"Updated metadata after deletion")
-        except Exception as e:
-            logger.warning(f"Could not update metadata: {e}")
 
-    def _update_metadata_after_addition(self, collection_path: str, new_filenames: List[str], doc_count: int, chunk_count: int):
-        """Update metadata JSON after adding files"""
-        try:
-            import json
-            from datetime import datetime
-            metadata_file = os.path.join(collection_path, "knowledge_base_metadata.json")
-            
-            if os.path.exists(metadata_file):
-                with open(metadata_file, 'r') as f:
-                    metadata = json.load(f)
-                
-                # Update file list and counts
-                existing_files = metadata.get("file_names", [])
-                metadata["file_names"] = existing_files + new_filenames
-                metadata["file_count"] = len(metadata["file_names"])
-                metadata["document_count"] = metadata.get("document_count", 0) + doc_count
-                metadata["chunk_count"] = metadata.get("chunk_count", 0) + chunk_count
-                metadata["last_modified"] = datetime.now().isoformat()
-                
-                with open(metadata_file, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                
-                logger.info(f"Updated metadata after addition")
-        except Exception as e:
-            logger.warning(f"Could not update metadata: {e}")
+# Convenience functions
+_kb_manager = None
 
-# Initialize global knowledge base manager
-kb_manager = KnowledgeBaseManager()
+def get_kb_manager():
+    """Get or create singleton KnowledgeBaseManager"""
+    global _kb_manager
+    if _kb_manager is None:
+        _kb_manager = KnowledgeBaseManager()
+    return _kb_manager
 
 def create_knowledge_base(user_id: str, collection_name: str, file_paths: List[str]) -> Dict[str, Any]:
-    """Convenience function for creating knowledge base"""
-    return kb_manager.create_user_knowledge_base(user_id, collection_name, file_paths)
+    return get_kb_manager().create_user_knowledge_base(user_id, collection_name, file_paths)
 
 def query_knowledge_base(user_id: str, collection_name: str, query: str, n_results: int = 5) -> Dict[str, Any]:
-    """Convenience function for querying knowledge base"""
-    return kb_manager.query_collection(user_id, collection_name, query, n_results)
+    return get_kb_manager().query_collection(user_id, collection_name, query, n_results)
 
-def get_user_collections(user_id: str) -> List[str]:
-    """Get list of user's collections"""
-    try:
-        # SECURITY: Sanitize user_id
-        safe_user_id = sanitize_path_component(user_id)
-        
-        user_path = create_safe_user_path("db_collection", safe_user_id)
-        if os.path.exists(user_path):
-            collections = [d for d in os.listdir(user_path) if os.path.isdir(os.path.join(user_path, d))]
-            logger.info(f"Found {len(collections)} collections for user {safe_user_id}: {collections}")
-            return collections
-        else:
-            logger.info(f"No directory found for user {safe_user_id}")
-            return []
-    except ValueError as ve:
-        logger.error(f"Security validation failed: {ve}")
-        return []
-    except Exception as e:
-        logger.error(f"Error getting collections for user {user_id}: {e}")
-        return []
+def get_active_collection(user_id: str) -> Optional[str]:
+    return get_kb_manager()._get_active_collection(user_id)
 
-def get_display_collection_name(user_id: str, namespaced_name: str) -> str:
-    """Convert namespaced collection name back to display name for UI"""
-    prefix = f"{user_id}_"
-    if namespaced_name.startswith(prefix):
-        return namespaced_name[len(prefix):]
-    return namespaced_name
+def set_active_collection(user_id: str, collection_name: str):
+    return get_kb_manager()._set_active_collection(collection_name, user_id)
+
+def get_user_collections(user_id: str) -> List[Dict[str, Any]]:
+    return get_kb_manager().get_user_collections(user_id)
 
 def delete_file(user_id: str, collection_name: str, filename: str) -> Dict[str, Any]:
-    """Convenience function for deleting a file"""
-    return kb_manager.delete_file_from_collection(user_id, collection_name, filename)
+    return get_kb_manager().delete_file_from_collection(user_id, collection_name, filename)
 
+def delete_collection(user_id: str, collection_name: str) -> Dict[str, Any]:
+    return get_kb_manager().delete_knowledge_base(user_id, collection_name)
 
 def add_files(user_id: str, collection_name: str, file_paths: List[str]) -> Dict[str, Any]:
-    """Convenience function for adding files to existing collection"""
-    return kb_manager.add_files_to_collection(user_id, collection_name, file_paths)
+    return get_kb_manager().add_files_to_collection(user_id, collection_name, file_paths)

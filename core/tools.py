@@ -20,6 +20,7 @@ from .quota_manager import QuotaManager
 from .llm_client import LLMClient
 from .web_search_agent import search_perplexity
 import ast
+from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 class BaseTool(ABC):
@@ -820,7 +821,7 @@ class RAGTool(BaseTool):
                     "query": query
                 }
             
-            from .knowledge_base import query_knowledge_base, get_user_collections
+            from .knowledge_base import query_knowledge_base, get_user_collections, get_active_collection, set_active_collection
             
             # Check if user has any collections
             logger.debug(f"Checking collections for user: {user_id}")
@@ -833,8 +834,9 @@ class RAGTool(BaseTool):
                     "error": "No knowledge base found. Please upload documents first.",
                     "query": query
                 }
-            
-            collection_name = collections[0]
+            collection_name = get_active_collection(user_id)
+            if not collection_name or collection_name not in collections:
+                collection_name = collections[0]
             logger.info(f"RAG querying collection '{collection_name}' for user {user_id}")
             
             # Query the user's collection

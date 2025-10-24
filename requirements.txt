@@ -62,5 +62,7 @@ langchain-neo4j
 rank-bm25
 
 unstructured[md]
+fastapi
 fastapi-limiter
 redis
+pymongo

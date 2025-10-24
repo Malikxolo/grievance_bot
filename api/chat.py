@@ -1,11 +1,18 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Depends, Body
 from fastapi.responses import JSONResponse
-from fastapi import Body
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from redis.asyncio import Redis
 from contextlib import asynccontextmanager
 from langchain_core.messages import HumanMessage, AIMessage
+from core.knowledge_base import (
+    get_kb_manager,
+    create_knowledge_base, 
+    delete_collection,
+    get_user_collections,
+    add_files,
+    delete_file
+)
 import logging
 router = APIRouter()
 import time
@@ -33,8 +40,15 @@ async def lifespan(app: FastAPI):
     global optimizedAgent
     config = Config()
 
-    redis_client = Redis(host=os.getenv('REDIS_HOST'), port=os.getenv('REDIS_PORT'), decode_responses=os.getenv('REDIS_DECODE_RESPONSES'), username=os.getenv('REDIS_USERNAME'), password=os.getenv('REDIS_PASSWORD'))
+    redis_client = Redis(
+        host=os.getenv('REDIS_HOST'), 
+        port=os.getenv('REDIS_PORT'), 
+        decode_responses=os.getenv('REDIS_DECODE_RESPONSES'), 
+        username=os.getenv('REDIS_USERNAME'), 
+        password=os.getenv('REDIS_PASSWORD')
+    )
     await FastAPILimiter.init(redis_client)
+    
     brain_model_config = config.create_llm_config(
         provider=settings.brain_provider,
         model=settings.brain_model,
@@ -56,22 +70,20 @@ async def lifespan(app: FastAPI):
 
     optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager)
 
-    
     optimizedAgent.worker_task = asyncio.create_task(
         optimizedAgent.background_task_worker()
     )
-    logging.info("✅ OptimizedAgent background worker started")
+    logging.info("OptimizedAgent background worker started")
 
     try:
         yield
     finally:
-        
         logging.info("⚡ Shutting down app lifespan...")
         optimizedAgent.worker_task.cancel()
         try:
             await optimizedAgent.worker_task
         except asyncio.CancelledError:
-            logging.info("✅ OptimizedAgent worker cancelled cleanly")
+            logging.info("OptimizedAgent worker cancelled cleanly")
 
 
 from pydantic import BaseModel
@@ -98,119 +110,6 @@ class UpdateAgentsRequest(BaseModel):
     heart_model: Optional[str]
     use_premium_search: Optional[bool]
     web_model: Optional[str]
-
-
-def list_files_in_directory(directory: str) -> List[str]:
-    """List all files in a given directory"""
-    if not os.path.exists(directory):
-        return []
-    return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
-    
-    
-def get_collection_metadata(user_id: str, collection_name: str):
-    metadata_path = f"db_collection/{user_id}/{collection_name}/knowledge_base_metadata.json"
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
-            return json.load(f)
-    return {"file_count": 0}
-
-def list_user_collections(user_id: str):
-    base_path = f"db_collection/{user_id}"
-    if not os.path.exists(base_path):
-        return []
-    return [c for c in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, c))]
-
-def get_users():
-    base_path = "db_collection"
-    if not os.path.exists(base_path):
-        return []
-    return [u for u in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, u))]
-    
-    
-    
-    
-async def create_agents_async(config, brain_model_config, heart_model_config, web_model_config, use_premium_search=False):
-    """Create Brain and Heart agents with selected models"""
-    try:
-        
-        brain_llm = LLMClient(brain_model_config)
-        heart_llm = LLMClient(heart_model_config)
-        
-        tool_manager = ToolManager(config, brain_llm, web_model_config, use_premium_search)
-        
-        brain_agent = BrainAgent(brain_llm, tool_manager)
-        heart_agent = HeartAgent(heart_llm)
-        
-        return {
-            "brain_agent": brain_agent,
-            "heart_agent": heart_agent,
-            "tool_manager": tool_manager,
-            "status": "success"
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-    
-async def process_query_real(query: str, brain_agent, heart_agent, style: str, user_id: str = None) -> Dict[str, Any]:
-    """Process query through REAL Brain-Heart system - NO HARDCODING"""
-    
-    try:
-        start_time = time.time()
-        
-        # Phase 1: Brain Agent Processing (REAL LLM-driven orchestration)
-        logging.info("🧠 Brain Agent analyzing query and selecting tools...")
-        brain_result = await brain_agent.process_query(query, user_id=user_id)
-        
-        brain_time = time.time() - start_time
-        
-        # Phase 2: Heart Agent Synthesis (REAL LLM-driven synthesis)
-        if brain_result.get("success"):
-            logging.info("❤️ Heart Agent synthesizing optimal response...")
-            heart_result = await heart_agent.synthesize_response(
-                brain_result, query, style
-            )
-            
-            total_time = time.time() - start_time
-            
-            return {
-                "success": True,
-                "brain_result": brain_result,
-                "heart_result": heart_result,
-                "brain_time": brain_time,
-                "total_time": total_time
-            }
-        else:
-            return {
-                "success": False,
-                "error": brain_result.get("error", "Brain processing failed"),
-                "brain_result": brain_result
-            }
-            
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"System processing failed: {str(e)}"
-        }
-        
-        
-def convert_pydantic_messages_to_dict(pydantic_messages: List[QueryMessage]) -> List[Dict[str, str]]:
-    """Convert Pydantic QueryMessage objects to dict format expected by Brain Agent"""
-    
-    return [{"role": msg.role, "content": msg.content} for msg in pydantic_messages]
-
-def convert_langchain_messages_to_dict(lc_messages: List) -> List[Dict[str, str]]:
-    """Convert LangChain messages to dict format expected by Brain Agent"""
-    
-    messages = []
-    for msg in lc_messages:
-        if isinstance(msg, HumanMessage):
-            messages.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            messages.append({"role": "assistant", "content": msg.content})
-        else:
-            # Handle other message types if needed
-            messages.append({"role": "unknown", "content": str(msg.content)})
-    
-    return messages
 
 
 @router.post("/set_agents")
@@ -253,7 +152,6 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         user_query = request.user_query
         chat_history = request.chat_history if hasattr(request, 'chat_history') else []
         
-        
         safe_log_user_data(user_id, 'brain_heart_chat', message_count=len(user_query))
         
         brain_provider = settings.brain_provider or os.getenv("BRAIN_LLM_PROVIDER")
@@ -262,8 +160,6 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         heart_model = settings.heart_model or os.getenv("HEART_LLM_MODEL")
         use_premium_search = settings.use_premium_search or os.getenv("USE_PREMIUM_SEARCH", "false").lower() == "true"
         web_model = settings.web_model or os.getenv("WEB_LLM_MODEL", "")
-        
-    
         
         config = Config()
         
@@ -292,19 +188,15 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         brain_llm = LLMClient(brain_model_config)
         heart_llm = LLMClient(heart_model_config)
         
-        
         optimizedAgent = OptimizedAgent(
             brain_llm,
             heart_llm,
             tool_manager
         )
         
-        
-        
         result = await optimizedAgent.process_query(user_query, chat_history, user_id)
         
         if result["success"]:
-            
             safe_log_response(result, level='info')
             return JSONResponse(content=result, status_code=200)
         else:
@@ -320,107 +212,127 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
             status_code=500
         )
 
-# Additional utility endpoints
 
-
-
-@router.get("/chat/memory/{user_id}")
-async def get_user_memory(user_id: str):
-    """Get memory summary for a specific user"""
-    
-    try:
-        # You'll need to access the brain agent instance
-        # This assumes it's available through some dependency injection or global state
-        agents = await create_agents_async(
-            config=None,  # Your config here
-            brain_model_config=None,  # Your brain model config
-            heart_model_config=None,  # Your heart model config
-            web_model_config=None,  # Your web model config
-            use_premium_search=False
-        )
-        
-        if agents["status"] != "success":
-            return JSONResponse(
-                content={"error": f"Failed to create agents: {agents['error']}"}, 
-                status_code=500
-            )
-        
-        memory_summary = agents["brain_agent"].get_memory_summary()
-        
-        return JSONResponse(content={
-            "user_id": user_id,
-            "memory_summary": memory_summary
-        }, status_code=200)
-        
-    except Exception as e:
-        logging.error(f"❌ Memory retrieval failed: {str(e)}")
-        return JSONResponse(
-            content={"error": f"Memory retrieval failed: {str(e)}"}, 
-            status_code=500
-        )
-
-@router.post("/chat/single-query")
-async def chat_single_query_legacy(query: str = Body(...), user_id: str = Body(...)):
-    """Legacy endpoint for single query processing (backward compatibility)"""
-    
-    try:
-        # Convert single query to messages format
-        messages = [{"role": "user", "content": query}]
-        
-        # Create a mock ChatMessage request
-        class MockUserQuery:
-            def __init__(self, messages):
-                self.messages = [QueryMessage(role=msg["role"], content=msg["content"]) for msg in messages]
-        
-        class MockChatMessage:
-            def __init__(self, userid, user_query):
-                self.userid = userid
-                self.user_query = user_query
-        
-        mock_request = MockChatMessage(user_id, MockUserQuery(messages))
-        
-        # Process through the Brain-Heart system
-        return await chat_brain_heart_system(mock_request)
-        
-    except Exception as e:
-        safe_log_error(e, context={'endpoint': 'single_query_processing'})
-        return JSONResponse(
-            content={"error": "Single query processing failed"}, 
-            status_code=500
-        )
-        
-
+# ============================================================================
+# KNOWLEDGE BASE / COLLECTION ENDPOINTS (DATABASE-DRIVEN)
+# ============================================================================
 
 @router.get("/get-collections")
 async def get_collections():
-    """List all user IDs with collections"""
+    """
+    List all collections across all users from MongoDB.
+    Returns aggregated view of all collections.
+    """
     try:
-        users = get_users()
-        data = []
+        kb_mgr = get_kb_manager()
+        
+        if not kb_mgr.mongo_available:
+            return JSONResponse(
+                content={
+                    "error": "MongoDB not available. Cannot retrieve collections.",
+                    "collections": []
+                }, 
+                status_code=503
+            )
+        
+        # Get all collections from MongoDB
+        all_collections = list(kb_mgr.mongo_db.collections.find(
+            {},
+            {"_id": 0}
+        ).sort("created_at", -1))
+        
+        # Format response
+        formatted_collections = []
+        for col in all_collections:
+            metadata = col.copy()
+            if "created_at" in metadata and hasattr(metadata["created_at"], "isoformat"):
+                metadata["created_at"] = metadata["created_at"].isoformat()
+            if "last_modified" in metadata and hasattr(metadata["last_modified"], "isoformat"):
+                metadata["last_modified"] = metadata["last_modified"].isoformat()
 
-        for user in users:
-            collections = list_user_collections(user)
-            for c in collections:
-                meta = get_collection_metadata(user, c)
-                data.append({"name": c, "metadata": [meta]})
-        return JSONResponse(content={"collections": data}, status_code=200)
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
+            formatted_collections.append({
+                "name": col.get("collection_name"),
+                "user_id": col.get("user_id"),
+                "metadata": metadata
+            })
+            
+        return JSONResponse(
+            content={"collections": formatted_collections}, 
+            status_code=200
+        )
 
         
+    except Exception as e:
+        logging.error(f"Error getting all collections: {e}")
+        return JSONResponse(
+            content={"error": str(e), "collections": []}, 
+            status_code=500
+        )
+
+
 @router.get("/collections/{user_id}")
 async def list_collections(user_id: str):
-    """List all collections for a given user"""
+    """
+    List all collections for a specific user from MongoDB.
+    """
     try:
-        collections = list_user_collections(user_id)
-        data = []
-        for c in collections:
-            meta = get_collection_metadata(user_id, c)
-            data.append({"name": c, "metadata": meta})
-        return JSONResponse(content={"collections": data}, status_code=200)
+        collections = get_user_collections(user_id)
+        
+        formatted_data = []
+        for col in collections:
+            metadata = col.copy()
+            if "created_at" in metadata and hasattr(metadata["created_at"], "isoformat"):
+                metadata["created_at"] = metadata["created_at"].isoformat()
+            if "last_modified" in metadata and hasattr(metadata["last_modified"], "isoformat"):
+                metadata["last_modified"] = metadata["last_modified"].isoformat()
+
+            formatted_data.append({
+                "name": col.get("collection_name"),
+                "metadata": metadata
+            })
+
+        
+        return JSONResponse(
+            content={"collections": formatted_data}, 
+            status_code=200
+        )
+        
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logging.error(f"Error listing collections for user {user_id}: {e}")
+        return JSONResponse(
+            content={"error": str(e), "collections": []}, 
+            status_code=500
+        )
+
+
+@router.get("/collections/{user_id}/{collection_name}")
+async def get_collection_details(user_id: str, collection_name: str):
+    """
+    Get detailed information about a specific collection.
+    """
+    try:
+        kb_mgr = get_kb_manager()
+        collection_info = kb_mgr.get_collection_info(user_id, collection_name)
+        
+        if collection_info:
+            metadata = collection_info.copy()
+            if "created_at" in metadata and hasattr(metadata["created_at"], "isoformat"):
+                metadata["created_at"] = metadata["created_at"].isoformat()
+            if "last_modified" in metadata and hasattr(metadata["last_modified"], "isoformat"):
+                metadata["last_modified"] = metadata["last_modified"].isoformat()
+
+            return JSONResponse(
+                content={"collection": metadata},
+                status_code=200
+            )
+
+            
+    except Exception as e:
+        logging.error(f"Error getting collection details: {e}")
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
 
 
 @router.post("/collections/create/local")
@@ -429,11 +341,150 @@ async def create_collection_local(
     collection_name: str = Form(...),
     files: List[UploadFile] = File(...)
 ):
-    """Create RAG collection from uploaded local files"""
+    """
+    Create RAG collection from uploaded local files.
+    Files are temporarily stored, processed, then deleted.
+    """
+    upload_dir = None
     try:
-        from core.knowledge_base import create_knowledge_base
-
+        # Create temporary upload directory
         upload_dir = f"temp_uploads/{user_id}/{collection_name}"
+        os.makedirs(upload_dir, exist_ok=True)
+        file_paths = []
+
+        # Save uploaded files temporarily
+        for file in files:
+            file_path = os.path.join(upload_dir, file.filename)
+            with open(file_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
+            file_paths.append(file_path)
+        
+        logging.info(f"Uploaded {len(file_paths)} files for user {user_id}")
+
+        
+        result = create_knowledge_base(user_id, collection_name, file_paths)
+
+        if result.get("success"):
+            metadata = result["metadata"].copy()
+            metadata.pop("_id", None)
+            if "created_at" in metadata:
+                metadata["created_at"] = metadata["created_at"].isoformat()
+            if "last_modified" in metadata:
+                metadata["last_modified"] = metadata["last_modified"].isoformat()
+
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "message": "Collection created successfully!",
+                    "metadata": metadata
+                },
+                status_code=200
+            )
+
+        else:
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+
+    except Exception as e:
+        logging.error(f"Error creating local collection: {e}", exc_info=True)
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+    finally:
+        # Cleanup temporary files
+        if upload_dir and os.path.exists(upload_dir):
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            logging.info(f"Cleaned up temporary directory: {upload_dir}")
+
+
+@router.post("/collections/create/drive")
+async def create_collection_drive(
+    user_id: str = Form(...), 
+    collection_name: str = Form(...), 
+    files: List[dict] = Body(...)
+):
+    """
+    Create RAG collection from Google Drive files.
+    Supports multi-account downloads with conflict resolution.
+    """
+    downloaded_files = []
+    try:
+        from core.google_drive_integration import MultiAccountGoogleDriveManager
+
+        drive_manager = MultiAccountGoogleDriveManager(user_id)
+
+        # Download files from Google Drive
+        downloaded_files = drive_manager.download_files_with_conflict_resolution(files)
+
+        if not downloaded_files:
+            return JSONResponse(
+                content={"error": "Failed to download files from Google Drive"}, 
+                status_code=500
+            )
+
+        logging.info(f"Downloaded {len(downloaded_files)} files from Google Drive")
+
+        # Create knowledge base
+        result = create_knowledge_base(user_id, collection_name, downloaded_files)
+
+        # Revoke Drive sessions for security
+        drive_manager.security_disconnect_all()
+
+        if result.get("success"):
+            metadata = result["metadata"].copy()
+            metadata.pop("_id", None)
+            if "created_at" in metadata:
+                metadata["created_at"] = metadata["created_at"].isoformat()
+            if "last_modified" in metadata:
+                metadata["last_modified"] = metadata["last_modified"].isoformat()
+
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "message": "Collection created successfully!",
+                    "metadata": metadata
+                },
+                status_code=200
+            )
+
+        else:
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+
+    except Exception as e:
+        logging.error(f"Error creating Drive collection: {e}", exc_info=True)
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+    finally:
+        # Cleanup downloaded files
+        for fp in downloaded_files:
+            if os.path.exists(fp):
+                os.remove(fp)
+                logging.info(f"Cleaned up downloaded file: {fp}")
+
+
+@router.post("/collections/{user_id}/{collection_name}/add-files")
+async def add_files_to_collection(
+    user_id: str,
+    collection_name: str,
+    files: List[UploadFile] = File(...)
+):
+    """
+    Add new files to an existing collection.
+    Prevents duplicate file additions.
+    """
+    upload_dir = None
+    try:
+        # Create temporary upload directory
+        upload_dir = f"temp_uploads/{user_id}/{collection_name}_add"
         os.makedirs(upload_dir, exist_ok=True)
         file_paths = []
 
@@ -441,68 +492,176 @@ async def create_collection_local(
         for file in files:
             file_path = os.path.join(upload_dir, file.filename)
             with open(file_path, "wb") as f:
-                f.write(await file.read())
+                content = await file.read()
+                f.write(content)
             file_paths.append(file_path)
 
-        result = create_knowledge_base(user_id, collection_name, file_paths)
+        # Add files to existing collection
+        result = add_files(user_id, collection_name, file_paths)
 
+        if result.get("success"):
+            return JSONResponse(
+                content={
+                    "message": f"Added {result.get('added_chunks')} chunks from {len(result.get('added_files', []))} files",
+                    "added_files": result.get("added_files"),
+                    "total_chunks": result.get("total_chunks")
+                }, 
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+
+    except Exception as e:
+        logging.error(f"Error adding files to collection: {e}", exc_info=True)
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+    finally:
         # Cleanup
-        shutil.rmtree(upload_dir, ignore_errors=True)
-
-        if result.get("success"):
-            return JSONResponse(content={"message": "✅ Collection created!"}, status_code=200)
-        else:
-            return JSONResponse(content={"error": result.get("error")}, status_code=500)
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/collections/create/drive")
-async def create_collection_drive(user_id: str = Form(...), collection_name: str = Form(...), files: List[dict] = Body(...)):
-    """Create RAG collection from Google Drive (multi-account support)"""
-    try:
-        from core.google_drive_integration import MultiAccountGoogleDriveManager
-        from core.knowledge_base import create_knowledge_base
-
-        drive_manager = MultiAccountGoogleDriveManager(user_id)
-
-        # Download only when creating
-        downloaded_files = drive_manager.download_files_with_conflict_resolution(files)
-
-        if not downloaded_files:
-            return JSONResponse(content={"error": "Failed to download files"}, status_code=500)
-
-        has_multiple_accounts = len(set(f.get('account_id') for f in files)) > 1
-        if has_multiple_accounts:
-            result = create_knowledge_base(user_id, collection_name, downloaded_files, account_info="multi_account")
-        else:
-            result = create_knowledge_base(user_id, collection_name, downloaded_files)
-
-        # Cleanup local files and revoke sessions
-        for fp in downloaded_files:
-            if os.path.exists(fp):
-                os.remove(fp)
-        drive_manager.security_disconnect_all()
-
-        if result.get("success"):
-            return JSONResponse(content={"message": "✅ Collection created from Google Drive!"}, status_code=200)
-        else:
-            return JSONResponse(content={"error": result.get("error")}, status_code=500)
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        if upload_dir and os.path.exists(upload_dir):
+            shutil.rmtree(upload_dir, ignore_errors=True)
 
 
 @router.delete("/collections/{user_id}/{collection_name}")
-async def delete_collection(user_id: str, collection_name: str):
-    """Delete an existing collection"""
+async def remove_collection(user_id: str, collection_name: str):
+    """
+    Delete an entire collection (removes from both ChromaDB and MongoDB).
+    """
     try:
-        collection_path = f"db_collection/{user_id}/{collection_name}"
-        if os.path.exists(collection_path):
-            shutil.rmtree(collection_path)
-            return JSONResponse(content={"message": f"✅ Collection {collection_name} deleted"}, status_code=200)
+        result = delete_collection(user_id, collection_name)
+        
+        if result.get("success"):
+            return JSONResponse(
+                content={"message": f"Collection '{collection_name}' deleted successfully!"}, 
+                status_code=200
+            )
         else:
-            return JSONResponse(content={"error": "Collection not found"}, status_code=404)
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+            
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logging.error(f"Error deleting collection: {e}")
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+
+
+@router.delete("/collections/{user_id}/{collection_name}/files/{filename}")
+async def remove_file_from_collection(
+    user_id: str, 
+    collection_name: str, 
+    filename: str
+):
+    """
+    Delete a specific file from a collection.
+    Removes all chunks associated with that file.
+    """
+    try:
+        result = delete_file(user_id, collection_name, filename)
+        
+        if result.get("success"):
+            return JSONResponse(
+                content={
+                    "message": f"File '{filename}' deleted successfully!",
+                    "deleted_chunks": result.get("deleted_chunks"),
+                    "remaining_chunks": result.get("remaining_chunks")
+                }, 
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+            
+    except Exception as e:
+        logging.error(f"Error deleting file: {e}")
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+
+
+@router.post("/collections/{user_id}/{collection_name}/query")
+async def query_collection(
+    user_id: str,
+    collection_name: str,
+    query: str = Body(..., embed=True),
+    n_results: int = Body(5, embed=True)
+):
+    """
+    Query a specific collection for relevant information.
+    Returns top N most relevant chunks.
+    """
+    try:
+        from core.knowledge_base import query_knowledge_base
+        
+        result = query_knowledge_base(user_id, collection_name, query, n_results)
+        
+        if result.get("success"):
+            return JSONResponse(
+                content={
+                    "query": result.get("query"),
+                    "results": result.get("results"),
+                    "metadatas": result.get("metadatas"),
+                    "distances": result.get("distances")
+                }, 
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={"error": result.get("error")}, 
+                status_code=500
+            )
+            
+    except Exception as e:
+        logging.error(f"Error querying collection: {e}")
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
+
+
+@router.get("/health/knowledge-base")
+async def health_check_kb():
+    """
+    Health check for knowledge base systems (ChromaDB + MongoDB).
+    """
+    try:
+        kb_mgr = get_kb_manager()
+        
+        health_status = {
+            "chromadb": "connected",
+            "mongodb": "connected" if kb_mgr.mongo_available else "unavailable",
+            "timestamp": time.time()
+        }
+        
+        # Test ChromaDB
+        try:
+            kb_mgr.chroma_client.heartbeat()
+        except Exception as e:
+            health_status["chromadb"] = f"error: {str(e)}"
+        
+        # Test MongoDB
+        if kb_mgr.mongo_available:
+            try:
+                kb_mgr.mongo_client.admin.command('ping')
+            except Exception as e:
+                health_status["mongodb"] = f"error: {str(e)}"
+        
+        status_code = 200 if health_status["chromadb"] == "connected" else 503
+        
+        return JSONResponse(content=health_status, status_code=status_code)
+        
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e)}, 
+            status_code=500
+        )
