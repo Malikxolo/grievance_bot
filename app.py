@@ -704,13 +704,24 @@ def render_rag_sidebar():
     if st.session_state.org_id:
         # In organization mode
         if check_permission(st.session_state.org_id, get_user_id(), "upload_documents"):
-            button_label = "Create Collection (Org)"
-            button_disabled = False
-            button_key = "create_org_collection"
+            # Check if teams exist
+            teams = org_manager.get_teams(st.session_state.org_id)
+            
+            if teams:
+                # Teams exist - show enabled button
+                button_label = "📤 Create Collection (Org)"
+                button_disabled = False
+                button_key = "create_org_collection"
+            else:
+                # No teams - show disabled button with message
+                button_label = "📤 Create Collection (Create teams first)"
+                button_disabled = True
+                button_key = "create_disabled_noteams"
         else:
             button_label = "🔒 Create Collection (Owner/Team Admin Only)"
             button_disabled = True
             button_key = "create_disabled_viewer"
+
 
     else:
         # Personal mode
