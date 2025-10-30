@@ -1,0 +1,46 @@
+* [33m9098d9a[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mscrape[m[33m)[m redis issue fixed
+* [33m2b2c3b6[m fix yes/no confirmation
+* [33me3e186b[m confirmation status fixed
+* [33mcb6f886[m scrapping guidence implemented
+* [33m21fcb9e[m[33m ([m[1;31morigin/Rag-fix[m[33m, [m[1;32mRag-fix[m[33m)[m fixes_functionality
+* [33m37fde3e[m fixes
+* [33ma8ef451[m fixes
+* [33m94267ce[m seperation of identitiy
+* [33m7f21741[m Moving all local changes to new branch new-merged
+* [33ma386be7[m updates
+* [33m53acd1a[m twin model
+* [33m27315c8[m integrated queue manager
+* [33m5d480aa[m update
+* [33m05fbfb2[m updates
+* [33m44fdb83[m updates
+* [33m7401ca6[m commited
+* [33mc26a350[m commited
+* [33m43acf15[m commited
+* [33mae088a4[m Update optimized_agent.py
+* [33m7f01e40[m commited
+* [33m1d0adb4[m Committed
+* [33m07be498[m My latest local changes
+* [33m5f24bb9[m updates
+* [33m06068f0[m update
+* [33m859bf4f[m update prompts
+* [33m56f86d4[m update
+* [33m23dc365[m update prompt
+*   [33mec139b8[m Merge branch 'fastapi-integ' of https://github.com/Malikxolo/brain_heart_model into fastapi-integ
+[32m|[m[33m\[m  
+[32m|[m * [33m08fa66a[m enhanced_query for tools
+* [33m|[m [33m8d6c325[m update regarding prompt
+[33m|[m[33m/[m  
+* [33m9c1cdaa[m update regarding context awarness
+* [33m60d68bf[m update regarding context awarness
+* [33m28e8103[m updated optimized agent
+* [33ma96c117[m next update
+* [33mbb377ae[m updates
+*   [33m8a4952e[m Merge branch 'main' of https://github.com/Malikxolo/brain_heart_model into fastapi-integ Latest files
+[34m|[m[35m\[m  
+[34m|[m * [33ma82bbe9[m Updated code with latest corrections
+* [35m|[m [33mfce3ddd[m fastapi
+[35m|[m[35m/[m  
+* [33maf97a8a[m Initial commit
+* [33m47aabd7[m first commit
+* [33mf793ea3[m updates
+* [33m31e3e09[m updates

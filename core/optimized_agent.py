@@ -372,6 +372,19 @@ class OptimizedAgent:
                     
                     logger.info(f"💬 Asking user for confirmation: {confirmation_message}")
                     
+                    # Save original query and confirmation message to memory BEFORE returning
+                    # This ensures conversation is preserved even if user changes topic
+                    await self.task_queue.put(
+                        AddBackgroundTask(
+                            func=partial(self.memory.add),
+                            params=(
+                                [{"role": "user", "content": query}, {"role": "assistant", "content": confirmation_message}],
+                                user_id,
+                            ),
+                        )
+                    )
+                    logger.info(f"💾 Saved confirmation exchange to memory")
+                    
                     return {
                         "success": True,
                         "needs_confirmation": True,
@@ -977,63 +990,49 @@ Perform ALL of the following analyses in ONE response:
     - Calculator: Extract numbers from sub-task, create valid Python expression
     - Web_search: Transform sub-task into focused search query, preserve qualifiers (when, how much, what type), add "2025" if time-sensitive
 
-9. CONFIRMATION RESPONSE ANALYSIS:
+ 9. CONFIRMATION RESPONSE ANALYSIS:
 
-   Check if there is a PENDING ACTION in the context above (look for "PENDING ACTION AWAITING USER RESPONSE" section).
+   Check if there is a PENDING ACTION in the context above.
    
    If PENDING ACTION EXISTS:
-   - You MUST analyze the user's message to determine their intent regarding the pending action
-   - Include "confirmation_response" in your JSON response with:
-     * "has_pending": true
-     * "user_intent": One of the following based on semantic analysis
-     * "confidence": 0-100 (how certain you are)
-     * "reasoning": Brief explanation of your decision
    
-   USER INTENT TYPES:
+   Understand the semantic meaning of the user's message in relation to the pending action.
    
-   a) "approve" - User wants to proceed with the pending action
-      Indicators: Agreement, confirmation, go-ahead signals
-      Examples: "yes", "okay", "continue", "do it", "haan", "chalo", "kar do", "theek hai"
+   Ask yourself: "What does the user REALLY want to do?"
    
-   b) "decline" - User does NOT want to proceed with the pending action
-      Indicators: 
-      - Direct rejection: "no", "cancel", "skip", "nahi", "mat karo", "rehne do"
-      - Urgency-based decline: "need answer quickly", "no time", "jldi chahiye", "fast chahiye"
-      - Implicit decline: User expresses frustration/urgency AND pending action is slow/heavy
-      
-      ⚠️ CRITICAL INSIGHT FOR DECLINE:
-      When user expresses URGENCY while a SLOW/HEAVY pending action exists:
-      → This means they want FAST answer, NOT the slow operation
-      → Interpret as DECLINE, not approval
-      
-      Real-world example: "ni bhai jldi chahiye" (no brother, need quickly)
-      Analysis: "ni" = no/negation + "jldi" = urgency/quickly
-      Meaning: User is saying NO to slow scraping, wants answer QUICKLY
-      Result: DECLINE (high confidence: 90%+)
+   Classify user intent as:
    
-   c) "new_query" - User is asking something completely different, ignoring the pending action
-      Indicators: Topic change, unrelated question, moving to new subject
-      Examples: "what is Python?", "tell me about AI", asking about different topic
+   "approve" - User consents to proceed with the pending action
+   → They agree, want to continue, willing to wait
    
-   d) "ambiguous" - Intent is unclear, mixed signals, needs clarification
-      Examples: "maybe", "hmm", "idk", "yes but show me something else"
+   "decline" - User rejects the pending action
+   → They explicitly refuse (negation words present)
+   → OR they express urgency/speed need while pending action is slow/heavy
+   → Key insight: urgency + slow operation = they want fast answer, NOT slow operation
    
-   ANALYSIS GUIDELINES:
-   - Consider semantic meaning (what do they REALLY want?)
-   - Consider emotional state (frustrated? urgent? casual?)
-   - Consider context awareness (urgency + heavy operation = decline)
-   - Consider language/culture (Hindi/Hinglish slang, casual speech)
-   - Set confidence HIGH (80-100) for clear cases
-   - Set confidence MEDIUM (50-79) for somewhat clear
-   - Set confidence LOW (<50) for ambiguous
+   "new_query" - User is talking about something completely different
+   → Topic changed, no relation to pending action
+   → Includes casual conversation, status questions, friendly chitchat
+   → User is ignoring the confirmation request
+   
+   "ambiguous" - Intent is unclear, mixed signals
+   
+   CRITICAL DISTINCTION:
+   Casual questions about process/status = "new_query" (NOT decline)
+   Actual rejection with negation/urgency = "decline"
+   
+   Set confidence 0-100 based on signal clarity:
+   - 80-100: Very clear intent
+   - 50-79: Somewhat clear
+   - 0-49: Unclear, ambiguous
+   
+   Provide brief reasoning explaining your semantic analysis.
    
    If NO PENDING ACTION EXISTS:
    - Set "has_pending": false
    - Set "user_intent": "new_query"
    - Set "confidence": 100
    - Set "reasoning": "No pending action exists"
-   
-   REMEMBER: When user shows URGENCY + pending action is SLOW → they want FAST answer = DECLINE
 
     EXAMPLES OF MULTI-TASK HANDLING:
 
