@@ -66,3 +66,4 @@ fastapi
 fastapi-limiter
 redis
 pymongo
+pypdf2

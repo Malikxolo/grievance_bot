@@ -1,730 +1,1452 @@
 """
-Knowledge Base Creation - Database-Driven Approach
-Stores metadata in MongoDB, vectors in ChromaDB (no folder structure)
-ENHANCED: PDF + DOCX Support + Multi-User Isolation
-SECURITY: Input sanitization to prevent injection attacks
-FIXED: PyMongo boolean check errors
+Knowledge Base Manager with Organization Integration
+Handles document storage, retrieval, and permissions using ChromaDB and MongoDB
 """
 
-import os
-import logging
-from typing import List, Dict, Any, Optional
+import asyncio
+from typing import List, Dict, Any, Optional, Tuple
+from uuid import uuid4
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-import uuid
-import tempfile
-import shutil
-
 import chromadb
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import TextLoader
-from langchain.schema import Document
-
-# MongoDB for metadata storage
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
-from redis.asyncio import Redis
-
-# Multi-format document loaders
-try:
-    from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
-    PDF_SUPPORT = True
-    DOCX_SUPPORT = True
-except ImportError:
-    PyPDFLoader = None
-    UnstructuredWordDocumentLoader = None
-    PDF_SUPPORT = False
-    DOCX_SUPPORT = False
-    
-load_dotenv()
-
-# Setup logger
+import hashlib
+import logging
 logger = logging.getLogger(__name__)
 
-class UTF8TextLoader(TextLoader):
-    """A custom TextLoader that enforces UTF-8 encoding."""
-    def __init__(self, file_path: str, **kwargs):
-        super().__init__(file_path, encoding='utf-8', **kwargs)
 
 class KnowledgeBaseManager:
-    """Manages user-specific knowledge base creation with database storage"""
+    """
+    Manages knowledge base operations with organization and team-level access control
+    Integrates ChromaDB for vector storage and MongoDB for metadata/permissions
+    """
     
-    def __init__(self, 
-                 chroma_host: str = None,
-                 chroma_port: int = 8000,
-                 mongo_uri: str = None,
-                 mongo_db_name: str = "knowledge_base"):
+    def __init__(
+        self,
+        chroma_client: chromadb.Client,
+        mongo_client: MongoClient,
+        org_manager,
+        embedding_function=None,
+        database_name: str = "knowledge_base"
+    ):
         """
-        Initialize with database connections
+        Initialize the Knowledge Base Manager
         
         Args:
-            chroma_host: ChromaDB host (if None, uses in-memory)
-            chroma_port: ChromaDB port
-            mongo_uri: MongoDB connection URI
-            mongo_db_name: MongoDB database name
+            chroma_client: ChromaDB client instance
+            mongo_client: MongoDB client instance
+            org_manager: OrganizationManager instance
+            embedding_function: Embedding function for ChromaDB (default: sentence-transformers)
+            database_name: MongoDB database name
         """
-        self.embeddings_model = "text-embedding-3-small"
-        self.chunk_size = 1000
-        self.chunk_overlap = 100
+        self.chroma_client = chroma_client
+        self.mongo_client = mongo_client
+        self.org_manager = org_manager
+        self.db = mongo_client[database_name]
         
-        # Setup ChromaDB client
-        self.chroma_client = self._setup_chroma_client(chroma_host, chroma_port)
+        # MongoDB collections
+        self.documents_collection = self.db.documents
+        self.collections_metadata = self.db.collection_metadata
         
-        # Setup MongoDB client for metadata
-        self.mongo_client, self.mongo_db = self._setup_mongo_client(mongo_uri, mongo_db_name)
-        
-        self.mongo_available = self.mongo_db is not None
-        
-        self.redis_client = Redis(
-            host=os.getenv('REDIS_HOST'), 
-            port=os.getenv('REDIS_PORT'), 
-            decode_responses=os.getenv('REDIS_DECODE_RESPONSES'), 
-            username=os.getenv('REDIS_USERNAME'), 
-            password=os.getenv('REDIS_PASSWORD')
+        # Default embedding function
+        self.embedding_function = embedding_function or embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="all-MiniLM-L6-v2"
         )
         
-        logger.info("KnowledgeBaseManager initialized with database storage")
-        if PDF_SUPPORT:
-            logger.info("PDF support available")
-        if DOCX_SUPPORT:
-            logger.info("DOCX support available")
-    
-    def _setup_chroma_client(self, host: str = None, port: int = 8000):
-        """Setup ChromaDB client"""
-        try:
-            if host or os.getenv('CHROMA_HOST'):
-                # Use hosted ChromaDB
-                actual_host = host or os.getenv('CHROMA_HOST')
-                actual_port = port or int(os.getenv('CHROMA_PORT', 8000))
-                logger.info(f"Using ChromaDB server: {actual_host}:{actual_port}")
-                return chromadb.HttpClient(host=actual_host, port=actual_port)
-            else:
-                
-                logger.info("Using local ChromaDB (disk persistence)")
-                return chromadb.PersistentClient()
-        except Exception as e:
-            logger.error(f"Failed to setup ChromaDB: {e}")
-            raise
+        self._setup_indexes()
         
-    def _set_active_collection(self, collection_name: str, user_id: str):
-        """Set active ChromaDB collection for user"""
-        namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
-        return self.redis_client.set(f"user:{user_id}:active_collection", namespaced_name)
     
-    def _get_active_collection(self, user_id: str) -> Optional[str]:
-        """Get active ChromaDB collection for user"""
-        return self.redis_client.get(f"user:{user_id}:active_collection")
+    def _setup_indexes(self):
+        """Create MongoDB indexes for efficient queries"""
+        # Index on org_id and team_id for fast lookups
+        self.documents_collection.create_index([("org_id", 1), ("team_id", 1)])
+        self.documents_collection.create_index("doc_id", unique=True)
+        self.documents_collection.create_index("collection_name")
+        
+        self.collections_metadata.create_index([("org_id", 1), ("team_id", 1)])
+        self.collections_metadata.create_index([("org_id", 1), ("collection_name", 1)], unique=True)
     
-    def _setup_mongo_client(self, uri: str = None, db_name: str = "knowledge_base"):
-        """Setup MongoDB client for metadata storage"""
+    def _get_collection_name(self, org_id: str, team_id: Optional[str] = None) -> str:
+        """
+        Generate a unique collection name for ChromaDB
+        
+        Args:
+            org_id: Organization ID
+            team_id: Team ID (optional, for team-specific collections)
+        
+        Returns:
+            Unique collection name
+        """
+        if team_id:
+            return f"{org_id}_{team_id}"
+        return f"{org_id}_global"
+    
+    async def create_global_collection(self):
+        """
+        Create a global collection for all organizations if it doesn't exist
+        """
         try:
-            mongo_uri = uri or os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            collection_name = "global_knowledge_base"
+            existing = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": "global", "collection_name": collection_name}
+            )
             
-            # Test connection
-            client.admin.command('ping')
-            db = client[db_name]
-            
-            # Create indexes for efficient queries
-            db.collections.create_index([("user_id", 1), ("collection_name", 1)], unique=True)
-            db.collections.create_index([("user_id", 1)])
-            db.collections.create_index([("created_at", -1)])
-            
-            logger.info(f"Connected to MongoDB: {mongo_uri}")
-            return client, db
-            
-        except ConnectionFailure as e:
-            logger.warning(f"MongoDB connection failed: {e}. Metadata storage disabled.")
-            return None, None
+            if not existing:
+                chroma_collection = await asyncio.to_thread(
+                    self.chroma_client.get_or_create_collection,
+                    name=collection_name,
+                    embedding_function=self.embedding_function,
+                    metadata={"org_id": "global"}
+                )
+                
+                collection_doc = {
+                    "collection_id": str(uuid4()),
+                    "collection_name": collection_name,
+                    "description": "Global knowledge base accessible to all organizations",
+                    "org_id": "global",
+                    "team_id": None,
+                    "chroma_collection_name": collection_name,
+                    "created_by": "system",
+                    "created_at": datetime.now(timezone.utc),
+                    "metadata": {},
+                    "document_count": 0
+                }
+                
+                await asyncio.to_thread(
+                    self.collections_metadata.insert_one,
+                    collection_doc
+                )
         except Exception as e:
-            logger.warning(f"MongoDB setup failed: {e}. Metadata storage disabled.")
-            return None, None
+            print(f"Error creating global collection: {e}")
     
-    def _sanitize_collection_name(self, name: str) -> str:
-        """Sanitize collection name to prevent injection"""
-        # Remove dangerous characters, keep alphanumeric, underscore, hyphen
-        import re
-        sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
-        # Limit length
-        return sanitized[:100]
-    
-    def _get_namespaced_collection_name(self, user_id: str, collection_name: str) -> str:
-        """Create user-namespaced collection name"""
-        safe_user_id = self._sanitize_collection_name(user_id)
-        safe_collection = self._sanitize_collection_name(collection_name)
-        return f"{safe_user_id}_{safe_collection}"
-    
-    def create_user_knowledge_base(
-        self, 
-        user_id: str, 
-        collection_name: str, 
-        file_paths: List[str]
+    async def create_collection(
+        self,
+        org_id: str,
+        collection_name: str,
+        description: str,
+        user_id: str,
+        team_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Create user-specific knowledge base from uploaded files"""
+        """
+        Create a new knowledge base collection
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Human-readable collection name
+            description: Collection description
+            user_id: User creating the collection
+            team_id: Team ID (if team-specific collection)
+            metadata: Additional metadata
+        
+        Returns:
+            {"success": bool, "collection_id": str, "error": str}
+        """
         try:
-            logger.info(f"Starting knowledge base creation for user {user_id}, collection: {collection_name}")
+            # Check permission
+            action = "upload_documents"
+            has_permission = await self.org_manager.check_permission(org_id, user_id, action)
             
-            # Sanitize inputs
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
             
-            # Extract file names
-            file_names = [os.path.basename(fp) for fp in file_paths]
+            # Verify team access if team_id provided
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                if not org:
+                    return {"success": False, "error": "Organization not found"}
+                
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team"}
+            
+            # Generate ChromaDB collection name
+            chroma_collection_name = self._get_collection_name(org_id, team_id)
             
             # Check if collection already exists
-            if self.mongo_available:  # FIXED: Use boolean flag
-                existing = self.mongo_db.collections.find_one({
-                    "user_id": safe_user_id,
-                    "collection_name": safe_collection_name
-                })
-                if existing is not None:  # FIXED: Compare with None
-                    return {
-                        "success": False,
-                        "error": f"Collection '{safe_collection_name}' already exists"
-                    }
+            existing = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
             
-            # Load documents from uploaded files
-            logger.info(f"Loading {len(file_paths)} documents...")
-            documents = self._load_documents_from_files(file_paths)
+            if existing:
+                return {"success": False, "error": "Collection name already exists in this organization"}
             
-            if not documents:
-                return {
-                    "success": False,
-                    "error": "No documents could be loaded",
-                    "details": {
-                        "file_count": len(file_paths),
-                        "file_names": file_names
-                    }
-                }
+            # Create ChromaDB collection
+            chroma_collection = await asyncio.to_thread(
+                self.chroma_client.get_or_create_collection,
+                name=chroma_collection_name,
+                embedding_function=self.embedding_function,
+                metadata={"org_id": org_id, "team_id": team_id or "global"}
+            )
             
-            logger.info(f"Successfully loaded {len(documents)} documents")
-            
-            # Split documents into chunks
-            logger.info("Splitting documents into chunks...")
-            texts = self._split_documents(documents)
-            logger.info(f"Split into {len(texts)} chunks")
-            
-            # Create embeddings and vector store
-            logger.info("Creating embeddings and ChromaDB vector store...")
-            result = self._create_vector_store(texts, safe_user_id, safe_collection_name)
-            self._set_active_collection(safe_collection_name, safe_user_id)
-            if result["success"]:
-                # Store metadata in MongoDB
-                metadata = {
-                    "user_id": safe_user_id,
-                    "collection_name": safe_collection_name,
-                    "snippet": texts[0].page_content[:50] if texts else "",
-                    "file_count": len(file_paths),
-                    "file_names": file_names,
-                    "document_count": len(documents),
-                    "chunk_count": len(texts),
-                    "embedding_model": self.embeddings_model,
-                    "chunk_size": self.chunk_size,
-                    "chunk_overlap": self.chunk_overlap,
-                    "created_at": datetime.now(timezone.utc),
-                    "last_modified": datetime.now(timezone.utc)
-                }
-                
-                self._save_metadata(metadata)
-                
-                logger.info(f"Knowledge base created successfully: {safe_collection_name}")
-                return {
-                    "success": True,
-                    "message": f"Knowledge base '{safe_collection_name}' created successfully",
-                    "metadata": metadata
-                }
-            else:
-                return result
-                
-        except Exception as e:
-            logger.error(f"Failed to create knowledge base: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Knowledge base creation failed: {str(e)}"
+            # Store metadata in MongoDB
+            collection_id = str(uuid4())
+            collection_doc = {
+                "collection_id": collection_id,
+                "collection_name": collection_name,
+                "description": description,
+                "org_id": org_id,
+                "team_id": team_id,
+                "chroma_collection_name": chroma_collection_name,
+                "created_by": user_id,
+                "created_at": datetime.now(timezone.utc),
+                "metadata": metadata or {},
+                "document_count": 0
             }
             
-    def delete_knowledge_base(self, user_id: str, collection_name: str) -> Dict[str, Any]:
-        """Delete entire user-specific knowledge base"""
-        try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
-            
-            # Delete from ChromaDB
-            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
-            self._delete_vector_store(namespaced_name)
-            
-            # Delete from MongoDB
-            if self.mongo_available:  # FIXED: Use boolean flag
-                result = self.mongo_db.collections.delete_one({
-                    "user_id": safe_user_id,
-                    "collection_name": safe_collection_name
-                })
-                logger.info(f"Deleted metadata: {result.deleted_count} document(s)")
+            await asyncio.to_thread(
+                self.collections_metadata.insert_one,
+                collection_doc
+            )
             
             return {
                 "success": True,
-                "message": f"Knowledge base '{safe_collection_name}' deleted successfully"
+                "collection_id": collection_id,
+                "chroma_collection_name": chroma_collection_name
             }
             
         except Exception as e:
-            logger.error(f"Error deleting knowledge base: {e}")
-            return {
-                "success": False,
-                "error": f"Failed to delete knowledge base: {str(e)}"
-            }
+            return {"success": False, "error": str(e)}
     
-    def _load_documents_from_files(self, file_paths: List[str]) -> List[Document]:
-        """Load documents from uploaded files"""
-        documents = []
+    async def upload_documents(
+        self,
+        org_id: str,
+        collection_name: str,
+        documents: List[str],
+        user_id: str,
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Upload documents to a knowledge base collection
         
-        # Try to import unstructured for comprehensive format support
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            documents: List of document texts
+            user_id: User uploading documents
+            metadatas: Optional metadata for each document
+            ids: Optional custom IDs for documents
+        
+        Returns:
+            {"success": bool, "document_ids": List[str], "error": str}
+        """
         try:
-            from unstructured.partition.auto import partition
-            UNSTRUCTURED_AVAILABLE = True
-            logger.info("Unstructured package available")
-        except ImportError:
-            UNSTRUCTURED_AVAILABLE = False
-            logger.warning("Unstructured not available. Limited format support.")
-        
-        for file_path in file_paths:
-            if not os.path.exists(file_path):
-                logger.warning(f"File not found: {file_path}")
-                continue
-                
-            filename = os.path.basename(file_path)
-            file_extension = os.path.splitext(filename)[1].lower()
+            # Check permission
+            has_permission = await self.org_manager.check_permission(org_id, user_id, "upload_documents")
             
-            logger.info(f"Processing file: {filename} (type: {file_extension})")
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
             
-            try:
-                # Use unstructured for comprehensive format support
-                if UNSTRUCTURED_AVAILABLE and file_extension in [
-                    '.md', '.rtf', '.csv', '.tsv', '.json',
-                    '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm',
-                    '.docm', '.dotx', '.dotm', '.dot',
-                    '.ppt', '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm',
-                    '.html', '.htm', '.xml',
-                    '.odt', '.ods', '.odp',
-                    '.epub', '.msg', '.eml'
-                ]:
-                    elements = partition(filename=file_path)
-                    content = "\n\n".join([str(element) for element in elements])
-                    
-                    doc = Document(
-                        page_content=content,
-                        metadata={
-                            "source": filename,
-                            "file_type": file_extension,
-                            "elements_count": len(elements)
-                        }
-                    )
-                    documents.append(doc)
-                    logger.info(f"Loaded {file_extension} file: {filename} ({len(elements)} elements)")
-                    
-                elif file_extension == '.txt':
-                    loader = UTF8TextLoader(file_path)
-                    file_docs = loader.load()
-                    for doc in file_docs:
-                        doc.metadata["source"] = filename
-                    documents.extend(file_docs)
-                    logger.info(f"Loaded text file: {filename}")
-                    
-                elif file_extension == '.pdf':
-                    if PDF_SUPPORT:
-                        loader = PyPDFLoader(file_path)
-                        file_docs = loader.load()
-                        for doc in file_docs:
-                            doc.metadata["source"] = filename
-                        documents.extend(file_docs)
-                        logger.info(f"Loaded PDF: {filename} ({len(file_docs)} pages)")
-                    else:
-                        logger.error(f"PDF support not available")
-                        
-                elif file_extension in ['.doc', '.docx']:
-                    if DOCX_SUPPORT:
-                        loader = UnstructuredWordDocumentLoader(file_path)
-                        file_docs = loader.load()
-                        for doc in file_docs:
-                            doc.metadata["source"] = filename
-                        documents.extend(file_docs)
-                        logger.info(f"Loaded Word document: {filename}")
-                    else:
-                        logger.error(f"DOCX support not available")
-                        
-                else:
-                    logger.warning(f"Unsupported file type: {file_extension} for file {filename}")
-                    
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                # Detect encryption/password-protected files
-                encryption_keywords = [
-                    'encrypt', 'password', 'decrypt', 'protected', 
-                    'badzipfile', 'pdfdecryptionerror', 'pdfreadeerror',
-                    'bad magic number', 'file is encrypted', 'bad password'
-                ]
-                
-                if any(keyword in error_msg for keyword in encryption_keywords):
-                    logger.error(f"❌ ENCRYPTED FILE: '{filename}' is password-protected")
-                else:
-                    logger.error(f"Error processing file {filename}: {e}")
-                
-                continue
-        
-        return documents
-
-    def _split_documents(self, documents: List[Document]) -> List[Document]:
-        """Split documents into chunks"""
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size, 
-            chunk_overlap=self.chunk_overlap
-        )
-        return text_splitter.split_documents(documents)
-    
-    def _delete_vector_store(self, collection_name: str):
-        """Delete ChromaDB collection"""
-        try:
-            existing_collections = [c.name for c in self.chroma_client.list_collections()]
-            if collection_name in existing_collections:
-                self.chroma_client.delete_collection(name=collection_name)
-                logger.info(f"Deleted collection: {collection_name}")
-        except Exception as e:
-            logger.error(f"Error deleting vector store: {e}")
-    
-    def _create_vector_store(self, texts: List[Document], user_id: str, collection_name: str) -> Dict[str, Any]:
-        """Create ChromaDB vector store"""
-        try:
-            # Create embeddings
-            embeddings = OpenAIEmbeddings(
-                model=self.embeddings_model, 
-                openai_api_key=os.getenv('OPENAI_API_KEY')
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
             )
             
-            # Create namespaced collection name
-            namespaced_name = self._get_namespaced_collection_name(user_id, collection_name)
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
             
-            # Clean up existing collection
-            self._delete_vector_store(namespaced_name)
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's collection"}
             
-            # Create new collection
-            collection = self.chroma_client.get_or_create_collection(name=namespaced_name)
+            # Generate document IDs if not provided
+            if ids is None:
+                ids = [str(uuid4()) for _ in documents]
             
-            # Generate embeddings for all texts
-            contents = [doc.page_content for doc in texts]
-            metadatas = [doc.metadata for doc in texts]
+            # Prepare metadatas
+            if metadatas is None:
+                metadatas = [{} for _ in documents]
             
-            # Create embeddings
-            embeddings_list = embeddings.embed_documents(contents)
+            # Add system metadata
+            for i, meta in enumerate(metadatas):
+                meta.update({
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "uploaded_by": user_id,
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "doc_id": ids[i]
+                })
             
-            # Generate IDs
-            ids = [str(uuid.uuid4()) for _ in range(len(texts))]
+            # Get ChromaDB collection
+            chroma_collection_name = collection_meta["chroma_collection_name"]
+            chroma_collection = await asyncio.to_thread(
+                self.chroma_client.get_collection,
+                name=chroma_collection_name,
+                embedding_function=self.embedding_function
+            )
             
-            # Add to collection
-            collection.add(
-                documents=contents,
+            # Add documents to ChromaDB
+            await asyncio.to_thread(
+                chroma_collection.add,
+                documents=documents,
                 metadatas=metadatas,
-                embeddings=embeddings_list,
                 ids=ids
             )
             
-            # Verify
-            count = collection.count()
-            logger.info(f"Vector store created: {count} entries in collection '{namespaced_name}'")
+            # Store document metadata in MongoDB
+            doc_records = []
+            for i, doc_id in enumerate(ids):
+                doc_records.append({
+                    "doc_id": doc_id,
+                    "collection_id": collection_meta["collection_id"],
+                    "collection_name": collection_name,
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "uploaded_by": user_id,
+                    "uploaded_at": datetime.now(timezone.utc),
+                    "document_text": documents[i],
+                    "metadata": metadatas[i],
+                    "document_hash": hashlib.sha256(documents[i].encode()).hexdigest()
+                })
+            
+            await asyncio.to_thread(
+                self.documents_collection.insert_many,
+                doc_records
+            )
+            
+            # Update document count
+            await asyncio.to_thread(
+                self.collections_metadata.update_one,
+                {"collection_id": collection_meta["collection_id"]},
+                {"$inc": {"document_count": len(documents)}}
+            )
             
             return {
                 "success": True,
-                "collection_count": count,
-                "created_at": datetime.utcnow().isoformat()
+                "document_ids": ids,
+                "count": len(documents)
             }
             
         except Exception as e:
-            logger.error(f"Error creating vector store: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Vector store creation failed: {str(e)}"
-            }
+            return {"success": False, "error": str(e)}
     
-    def _save_metadata(self, metadata: Dict[str, Any]):
-        """Save metadata to MongoDB"""
-        if not self.mongo_available:  # FIXED: Use boolean flag
-            logger.warning("MongoDB not available, metadata not saved")
-            return
-        
-        try:
-            self.mongo_db.collections.insert_one(metadata)
-            logger.info(f"Metadata saved for collection: {metadata['collection_name']}")
-        except Exception as e:
-            logger.error(f"Failed to save metadata: {e}")
-    
-    def get_collection_info(self, user_id: str, collection_name: str) -> Optional[Dict[str, Any]]:
-        """Get information about user's collection"""
-        if not self.mongo_available:  # FIXED: Use boolean flag
-            return None
-        
-        try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
-            
-            metadata = self.mongo_db.collections.find_one({
-                "user_id": safe_user_id,
-                "collection_name": safe_collection_name
-            }, {"_id": 0})
-            
-            return metadata
-            
-        except Exception as e:
-            logger.error(f"Error getting collection info: {e}")
-            return None
-    
-    def get_user_collections(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get list of user's collections with metadata"""
-        if not self.mongo_available:  # FIXED: Use boolean flag
-            return []
-        
-        try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            
-            collections = list(self.mongo_db.collections.find(
-                {"user_id": safe_user_id},
-                {"_id": 0}
-            ).sort("created_at", -1))
-            
-            logger.info(f"Found {len(collections)} collections for user {safe_user_id}")
-            return collections
-            
-        except Exception as e:
-            logger.error(f"Error getting collections: {e}")
-            return []
-    
-    def query_collection(
-        self, 
-        user_id: str, 
-        collection_name: str, 
-        query: str, 
-        n_results: int = 5
+    async def query_documents(
+        self,
+        org_id: str,
+        collection_name: str,
+        query_text: str,
+        user_id: str,
+        n_results: int = 5,
+        where: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Query user's knowledge base collection"""
+        """
+        Query documents using semantic search
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            query_text: Query text
+            user_id: User making the query
+            n_results: Number of results to return
+            where: Optional metadata filters
+        
+        Returns:
+            {"success": bool, "results": List[Dict], "error": str}
+        """
         try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
+            # Verify user is in organization
+            org = await self.org_manager.get_organization(org_id)
+            if not org:
+                return {"success": False, "error": "Organization not found"}
             
-            # Get namespaced collection
-            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
-            collection = self.chroma_client.get_collection(name=namespaced_name)
+            if user_id not in org.get("members", {}):
+                return {"success": False, "error": "User not in organization"}
             
-            # Create query embedding
-            embeddings = OpenAIEmbeddings(
-                model=self.embeddings_model,
-                openai_api_key=os.getenv('OPENAI_API_KEY')
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
             )
-            query_embedding = embeddings.embed_query(query)
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                user_role = org.get("members", {}).get(user_id, {}).get("role")
+                
+                # Allow access if user is in the team, is owner, or can select teams
+                can_access = (
+                    user_team_id == team_id or
+                    org.get("owner_id") == user_id or
+                    user_role == "owner"
+                )
+                
+                if not can_access:
+                    return {"success": False, "error": "Access denied to this team's collection"}
+            
+            # Get ChromaDB collection
+            chroma_collection_name = collection_meta["chroma_collection_name"]
+            chroma_collection = await asyncio.to_thread(
+                self.chroma_client.get_collection,
+                name=chroma_collection_name,
+                embedding_function=self.embedding_function
+            )
             
             # Perform query
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results
+            results = await asyncio.to_thread(
+                chroma_collection.query,
+                query_texts=[query_text],
+                n_results=n_results,
+                where=where,
+                include=["documents", "metadatas", "distances"]
             )
             
-            logger.info(f"Query executed: {len(results['documents'][0])} results")
+            # Format results
+            formatted_results = []
+            if results and results.get("ids") and len(results["ids"]) > 0:
+                for i in range(len(results["ids"][0])):
+                    formatted_results.append({
+                        "id": results["ids"][0][i],
+                        "document": results["documents"][0][i],
+                        "metadata": results["metadatas"][0][i],
+                        "distance": results["distances"][0][i]
+                    })
             
             return {
                 "success": True,
-                "query": query,
-                "results": results['documents'][0] if results['documents'] else [],
-                "metadatas": results['metadatas'][0] if results['metadatas'] else [],
-                "distances": results['distances'][0] if results['distances'] else []
+                "results": formatted_results,
+                "query": query_text,
+                "count": len(formatted_results)
             }
             
         except Exception as e:
-            logger.error(f"Error querying collection: {e}")
-            return {
-                "success": False,
-                "error": f"Query failed: {str(e)}",
-                "results": []
-            }
-
-    def delete_file_from_collection(
-        self, 
-        user_id: str, 
-        collection_name: str, 
-        filename: str
+            return {"success": False, "error": str(e)}
+    
+    async def delete_documents(
+        self,
+        org_id: str,
+        collection_name: str,
+        document_ids: List[str],
+        user_id: str
     ) -> Dict[str, Any]:
-        """Delete all chunks from a specific file"""
+        """
+        Delete documents from a collection
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            document_ids: List of document IDs to delete
+            user_id: User deleting documents
+        
+        Returns:
+            {"success": bool, "deleted_count": int, "error": str}
+        """
         try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
+            # Check permission
+            has_permission = await self.org_manager.check_permission(org_id, user_id, "delete_collection")
             
-            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
-            collection = self.chroma_client.get_collection(name=namespaced_name)
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
             
-            count_before = collection.count()
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
             
-            # Get and delete items
-            items_to_delete = collection.get(where={"source": filename})
-            if items_to_delete['ids']:
-                collection.delete(ids=items_to_delete['ids'])
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
             
-            count_after = collection.count()
-            deleted_chunks = count_before - count_after
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's collection"}
             
-            # Update MongoDB metadata
-            if self.mongo_available:  # FIXED: Use boolean flag
-                self.mongo_db.collections.update_one(
-                    {"user_id": safe_user_id, "collection_name": safe_collection_name},
-                    {
-                        "$pull": {"file_names": filename},
-                        "$inc": {
-                            "file_count": -1,
-                            "chunk_count": -deleted_chunks
-                        },
-                        "$set": {"last_modified": datetime.utcnow()}
-                    }
-                )
+            # Get ChromaDB collection
+            chroma_collection_name = collection_meta["chroma_collection_name"]
+            chroma_collection = await asyncio.to_thread(
+                self.chroma_client.get_collection,
+                name=chroma_collection_name,
+                embedding_function=self.embedding_function
+            )
             
-            logger.info(f"Deleted {deleted_chunks} chunks from file '{filename}'")
+            # Delete from ChromaDB
+            await asyncio.to_thread(
+                chroma_collection.delete,
+                ids=document_ids
+            )
+            
+            # Delete from MongoDB
+            result = await asyncio.to_thread(
+                self.documents_collection.delete_many,
+                {"doc_id": {"$in": document_ids}, "org_id": org_id}
+            )
+            
+            # Update document count
+            await asyncio.to_thread(
+                self.collections_metadata.update_one,
+                {"collection_id": collection_meta["collection_id"]},
+                {"$inc": {"document_count": -result.deleted_count}}
+            )
             
             return {
                 "success": True,
-                "deleted_file": filename,
-                "deleted_chunks": deleted_chunks,
-                "remaining_chunks": count_after
+                "deleted_count": result.deleted_count
             }
             
         except Exception as e:
-            logger.error(f"Error deleting file: {e}")
-            return {
-                "success": False,
-                "error": f"Failed to delete file: {str(e)}"
-            }
-
-    def add_files_to_collection(
-        self, 
-        user_id: str, 
-        collection_name: str, 
-        file_paths: List[str]
+            return {"success": False, "error": str(e)}
+    
+    async def delete_collection(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str
     ) -> Dict[str, Any]:
-        """Add new files to existing collection"""
+        """
+        Delete an entire collection
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            user_id: User deleting the collection
+        
+        Returns:
+            {"success": bool, "error": str}
+        """
         try:
-            safe_user_id = self._sanitize_collection_name(user_id)
-            safe_collection_name = self._sanitize_collection_name(collection_name)
+            # Check permission
+            has_permission = await self.org_manager.check_permission(org_id, user_id, "delete_collection")
+            logger.info(self.chroma_client.list_collections())
+
             
-            # Check for duplicates
-            if self.mongo_available:  # FIXED: Use boolean flag
-                existing_metadata = self.mongo_db.collections.find_one({
-                    "user_id": safe_user_id,
-                    "collection_name": safe_collection_name
-                })
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
+            
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's collection"}
+            
+            # Delete ChromaDB collection
+            chroma_collection_name = collection_meta["chroma_collection_name"]
+            await asyncio.to_thread(
+                self.chroma_client.delete_collection,
+                name=chroma_collection_name
+            )
+            
+            # Delete all documents from MongoDB
+            await asyncio.to_thread(
+                self.documents_collection.delete_many,
+                {"collection_id": collection_meta["collection_id"]}
+            )
+            
+            # Delete collection metadata
+            await asyncio.to_thread(
+                self.collections_metadata.delete_one,
+                {"collection_id": collection_meta["collection_id"]}
+            )
+            
+            return {"success": True}
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def list_collections(
+        self,
+        org_id: str,
+        user_id: str,
+        team_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        List all collections accessible to a user
+        
+        Args:
+            org_id: Organization ID
+            user_id: User requesting the list
+            team_id: Optional team filter
+        
+        Returns:
+            {"success": bool, "collections": List[Dict], "error": str}
+        """
+        try:
+            # Verify user is in organization
+            org = await self.org_manager.get_organization(org_id)
+            if not org:
+                return {"success": False, "error": "Organization not found"}
+            
+            if user_id not in org.get("members", {}):
+                return {"success": False, "error": "User not in organization"}
+            
+            # Build query
+            query = {"org_id": org_id}
+            
+            # Filter by team if specified
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team"}
+                query["team_id"] = team_id
+            else:
+                # If no team specified, show collections user has access to
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                user_role = org.get("members", {}).get(user_id, {}).get("role")
                 
-                if existing_metadata is not None:  # FIXED: Compare with None
-                    existing_files = set(existing_metadata.get("file_names", []))
-                    new_file_names = [os.path.basename(fp) for fp in file_paths]
-                    duplicates = [f for f in new_file_names if f in existing_files]
-                    
-                    if duplicates:
-                        return {
-                            "success": False,
-                            "error": f"Files already exist: {', '.join(duplicates)}"
-                        }
+                if user_role == "owner":
+                    # Owner sees all collections
+                    pass
+                else:
+                    # Non-owners see global collections and their team's collections
+                    query["$or"] = [
+                        {"team_id": None},
+                        {"team_id": user_team_id}
+                    ]
             
-            # Load and process new files
-            documents = self._load_documents_from_files(file_paths)
-            
-            if not documents:
-                return {
-                    "success": False,
-                    "error": "No documents could be loaded"
-                }
-            
-            # Split into chunks
-            texts = self._split_documents(documents)
-            
-            # Get existing collection
-            namespaced_name = self._get_namespaced_collection_name(safe_user_id, safe_collection_name)
-            collection = self.chroma_client.get_collection(name=namespaced_name)
-            
-            current_count = collection.count()
-            
-            # Create embeddings
-            embeddings = OpenAIEmbeddings(
-                model=self.embeddings_model,
-                openai_api_key=os.getenv('OPENAI_API_KEY')
+            # Get collections
+            collections = await asyncio.to_thread(
+                lambda: list(self.collections_metadata.find(query))
             )
             
-            contents = [doc.page_content for doc in texts]
-            metadatas = [doc.metadata for doc in texts]
-            embeddings_list = embeddings.embed_documents(contents)
-            ids = [str(uuid.uuid4()) for _ in range(len(texts))]
-            
-            # Add to collection
-            collection.add(
-                documents=contents,
-                metadatas=metadatas,
-                embeddings=embeddings_list,
-                ids=ids
-            )
-            
-            # Update MongoDB metadata
-            file_names = [os.path.basename(fp) for fp in file_paths]
-            if self.mongo_available:  # FIXED: Use boolean flag
-                self.mongo_db.collections.update_one(
-                    {"user_id": safe_user_id, "collection_name": safe_collection_name},
-                    {
-                        "$push": {"file_names": {"$each": file_names}},
-                        "$inc": {
-                            "file_count": len(file_names),
-                            "document_count": len(documents),
-                            "chunk_count": len(texts)
-                        },
-                        "$set": {"last_modified": datetime.utcnow()}
-                    }
-                )
+            # Format results
+            formatted_collections = []
+            for col in collections:
+                formatted_collections.append({
+                    "collection_id": col["collection_id"],
+                    "collection_name": col["collection_name"],
+                    "description": col.get("description", ""),
+                    "team_id": col.get("team_id"),
+                    "document_count": col.get("document_count", 0),
+                    "created_by": col.get("created_by"),
+                    "created_at": col.get("created_at").isoformat() if col.get("created_at") else None
+                })
             
             return {
                 "success": True,
-                "added_files": file_names,
-                "added_chunks": len(texts),
-                "total_chunks": current_count + len(texts)
+                "collections": formatted_collections,
+                "count": len(formatted_collections)
             }
             
         except Exception as e:
-            logger.error(f"Error adding files: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Failed to add files: {str(e)}"
+            return {"success": False, "error": str(e)}
+    
+    async def get_collection_stats(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Get statistics for a collection
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            user_id: User requesting stats
+        
+        Returns:
+            {"success": bool, "stats": Dict, "error": str}
+        """
+        try:
+            # Verify user access
+            org = await self.org_manager.get_organization(org_id)
+            if not org or user_id not in org.get("members", {}):
+                return {"success": False, "error": "Access denied"}
+            
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied"}
+            
+            # Get document stats from MongoDB
+            doc_count = await asyncio.to_thread(
+                self.documents_collection.count_documents,
+                {"collection_id": collection_meta["collection_id"]}
+            )
+            
+            # Get recent uploads
+            recent_docs = await asyncio.to_thread(
+                lambda: list(self.documents_collection.find(
+                    {"collection_id": collection_meta["collection_id"]}
+                ).sort("uploaded_at", -1).limit(5))
+            )
+            
+            stats = {
+                "collection_id": collection_meta["collection_id"],
+                "collection_name": collection_name,
+                "description": collection_meta.get("description", ""),
+                "team_id": team_id,
+                "document_count": doc_count,
+                "created_by": collection_meta.get("created_by"),
+                "created_at": collection_meta.get("created_at").isoformat() if collection_meta.get("created_at") else None,
+                "recent_uploads": [
+                    {
+                        "doc_id": doc["doc_id"],
+                        "uploaded_by": doc.get("uploaded_by"),
+                        "uploaded_at": doc.get("uploaded_at").isoformat() if doc.get("uploaded_at") else None
+                    }
+                    for doc in recent_docs
+                ]
             }
+            
+            return {
+                "success": True,
+                "stats": stats
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def update_collection(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str,
+        new_name: Optional[str] = None,
+        new_description: Optional[str] = None,
+        new_metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Update collection metadata
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Current collection name
+            user_id: User updating the collection
+            new_name: New collection name (optional)
+            new_description: New description (optional)
+            new_metadata: New metadata (optional)
+        
+        Returns:
+            {"success": bool, "error": str}
+        """
+        try:
+            # Check permission
+            has_permission = await self.org_manager.check_permission(org_id, user_id, "edit_collection")
+            
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
+            
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's collection"}
+            
+            # Build update document
+            update_doc = {}
+            if new_name:
+                # Check if new name already exists
+                existing = await asyncio.to_thread(
+                    self.collections_metadata.find_one,
+                    {"org_id": org_id, "collection_name": new_name, "collection_id": {"$ne": collection_meta["collection_id"]}}
+                )
+                if existing:
+                    return {"success": False, "error": "Collection name already exists"}
+                update_doc["collection_name"] = new_name
+            
+            if new_description:
+                update_doc["description"] = new_description
+            
+            if new_metadata:
+                update_doc["metadata"] = new_metadata
+            
+            if not update_doc:
+                return {"success": False, "error": "No updates provided"}
+            
+            update_doc["updated_at"] = datetime.now(timezone.utc)
+            update_doc["updated_by"] = user_id
+            
+            # Update in MongoDB
+            await asyncio.to_thread(
+                self.collections_metadata.update_one,
+                {"collection_id": collection_meta["collection_id"]},
+                {"$set": update_doc}
+            )
+            
+            # Update documents if name changed
+            if new_name:
+                await asyncio.to_thread(
+                    self.documents_collection.update_many,
+                    {"collection_id": collection_meta["collection_id"]},
+                    {"$set": {"collection_name": new_name}}
+                )
+            
+            return {"success": True}
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def get_document(
+        self,
+        org_id: str,
+        document_id: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Get a specific document by ID
+        
+        Args:
+            org_id: Organization ID
+            document_id: Document ID
+            user_id: User requesting the document
+        
+        Returns:
+            {"success": bool, "document": Dict, "error": str}
+        """
+        try:
+            # Verify user is in organization
+            org = await self.org_manager.get_organization(org_id)
+            if not org or user_id not in org.get("members", {}):
+                return {"success": False, "error": "Access denied"}
+            
+            # Get document
+            doc = await asyncio.to_thread(
+                self.documents_collection.find_one,
+                {"doc_id": document_id, "org_id": org_id}
+            )
+            
+            if not doc:
+                return {"success": False, "error": "Document not found"}
+            
+            # Verify team access
+            team_id = doc.get("team_id")
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's document"}
+            
+            # Format document
+            formatted_doc = {
+                "doc_id": doc["doc_id"],
+                "collection_id": doc.get("collection_id"),
+                "collection_name": doc.get("collection_name"),
+                "document_text": doc.get("document_text"),
+                "metadata": doc.get("metadata", {}),
+                "uploaded_by": doc.get("uploaded_by"),
+                "uploaded_at": doc.get("uploaded_at").isoformat() if doc.get("uploaded_at") else None
+            }
+            
+            return {
+                "success": True,
+                "document": formatted_doc
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def update_document(
+        self,
+        org_id: str,
+        document_id: str,
+        user_id: str,
+        new_text: Optional[str] = None,
+        new_metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Update a document's text or metadata
+        
+        Args:
+            org_id: Organization ID
+            document_id: Document ID
+            user_id: User updating the document
+            new_text: New document text (optional)
+            new_metadata: New metadata (optional)
+        
+        Returns:
+            {"success": bool, "error": str}
+        """
+        try:
+            # Check permission
+            has_permission = await self.org_manager.check_permission(org_id, user_id, "upload_documents")
+            
+            if not has_permission:
+                return {"success": False, "error": "Permission denied"}
+            
+            # Get document
+            doc = await asyncio.to_thread(
+                self.documents_collection.find_one,
+                {"doc_id": document_id, "org_id": org_id}
+            )
+            
+            if not doc:
+                return {"success": False, "error": "Document not found"}
+            
+            # Verify team access
+            team_id = doc.get("team_id")
+            if team_id:
+                org = await self.org_manager.get_organization(org_id)
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied to this team's document"}
+            
+            # Build update
+            mongo_update = {}
+            chroma_update = {}
+            
+            if new_text:
+                mongo_update["document_text"] = new_text
+                mongo_update["document_hash"] = hashlib.sha256(new_text.encode()).hexdigest()
+                chroma_update["documents"] = [new_text]
+            
+            if new_metadata:
+                # Merge with existing metadata
+                merged_metadata = doc.get("metadata", {}).copy()
+                merged_metadata.update(new_metadata)
+                mongo_update["metadata"] = merged_metadata
+                chroma_update["metadatas"] = [merged_metadata]
+            
+            if not mongo_update and not chroma_update:
+                return {"success": False, "error": "No updates provided"}
+            
+            mongo_update["updated_at"] = datetime.now(timezone.utc)
+            mongo_update["updated_by"] = user_id
+            
+            # Update in MongoDB
+            await asyncio.to_thread(
+                self.documents_collection.update_one,
+                {"doc_id": document_id},
+                {"$set": mongo_update}
+            )
+            
+            # Update in ChromaDB if needed
+            if chroma_update:
+                collection_meta = await asyncio.to_thread(
+                    self.collections_metadata.find_one,
+                    {"collection_id": doc["collection_id"]}
+                )
+                
+                if collection_meta:
+                    chroma_collection = await asyncio.to_thread(
+                        self.chroma_client.get_collection,
+                        name=collection_meta["chroma_collection_name"],
+                        embedding_function=self.embedding_function
+                    )
+                    
+                    await asyncio.to_thread(
+                        chroma_collection.update,
+                        ids=[document_id],
+                        **chroma_update
+                    )
+            
+            return {"success": True}
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def search_all_collections(
+        self,
+        org_id: str,
+        query_text: str,
+        user_id: str,
+        n_results: int = 5,
+        team_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Search across all accessible collections
+        
+        Args:
+            org_id: Organization ID
+            query_text: Query text
+            user_id: User making the query
+            n_results: Number of results per collection
+            team_id: Optional team filter
+        
+        Returns:
+            {"success": bool, "results": Dict[str, List], "error": str}
+        """
+        try:
+            # Get accessible collections
+            collections_result = await self.list_collections(org_id, user_id, team_id)
+            
+            if not collections_result["success"]:
+                return collections_result
+            
+            # Search each collection
+            all_results = {}
+            for collection in collections_result["collections"]:
+                collection_name = collection["collection_name"]
+                search_result = await self.query_documents(
+                    org_id=org_id,
+                    collection_name=collection_name,
+                    query_text=query_text,
+                    user_id=user_id,
+                    n_results=n_results
+                )
+                
+                if search_result["success"] and search_result["results"]:
+                    all_results[collection_name] = search_result["results"]
+            
+            return {
+                "success": True,
+                "results": all_results,
+                "collections_searched": len(collections_result["collections"]),
+                "query": query_text
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def batch_upload_documents(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str,
+        documents: List[str],
+        batch_size: int = 100,
+        metadatas: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Upload documents in batches for better performance
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            user_id: User uploading documents
+            documents: List of document texts
+            batch_size: Number of documents per batch
+            metadatas: Optional metadata for each document
+        
+        Returns:
+            {"success": bool, "total_uploaded": int, "batches": int, "error": str}
+        """
+        try:
+            total_docs = len(documents)
+            batches = (total_docs + batch_size - 1) // batch_size
+            uploaded_count = 0
+            
+            for i in range(0, total_docs, batch_size):
+                batch_docs = documents[i:i + batch_size]
+                batch_metas = metadatas[i:i + batch_size] if metadatas else None
+                
+                result = await self.upload_documents(
+                    org_id=org_id,
+                    collection_name=collection_name,
+                    documents=batch_docs,
+                    user_id=user_id,
+                    metadatas=batch_metas
+                )
+                
+                if result["success"]:
+                    uploaded_count += result["count"]
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Failed at batch {i//batch_size + 1}: {result.get('error')}",
+                        "uploaded_before_error": uploaded_count
+                    }
+            
+            return {
+                "success": True,
+                "total_uploaded": uploaded_count,
+                "batches": batches
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def get_documents_by_metadata(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str,
+        metadata_filter: Dict[str, Any],
+        limit: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Get documents by metadata filter
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            user_id: User requesting documents
+            metadata_filter: MongoDB-style metadata filter
+            limit: Maximum number of documents to return
+        
+        Returns:
+            {"success": bool, "documents": List[Dict], "error": str}
+        """
+        try:
+            # Verify user access
+            org = await self.org_manager.get_organization(org_id)
+            if not org or user_id not in org.get("members", {}):
+                return {"success": False, "error": "Access denied"}
+            
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied"}
+            
+            # Build query
+            query = {
+                "collection_id": collection_meta["collection_id"],
+                "org_id": org_id
+            }
+            
+            # Add metadata filters
+            for key, value in metadata_filter.items():
+                query[f"metadata.{key}"] = value
+            
+            # Get documents
+            docs = await asyncio.to_thread(
+                lambda: list(self.documents_collection.find(query).limit(limit))
+            )
+            
+            # Format documents
+            formatted_docs = []
+            for doc in docs:
+                formatted_docs.append({
+                    "doc_id": doc["doc_id"],
+                    "document_text": doc.get("document_text"),
+                    "metadata": doc.get("metadata", {}),
+                    "uploaded_by": doc.get("uploaded_by"),
+                    "uploaded_at": doc.get("uploaded_at").isoformat() if doc.get("uploaded_at") else None
+                })
+            
+            return {
+                "success": True,
+                "documents": formatted_docs,
+                "count": len(formatted_docs)
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def export_collection(
+        self,
+        org_id: str,
+        collection_name: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Export all documents from a collection
+        
+        Args:
+            org_id: Organization ID
+            collection_name: Collection name
+            user_id: User exporting the collection
+        
+        Returns:
+            {"success": bool, "documents": List[Dict], "metadata": Dict, "error": str}
+        """
+        try:
+            # Verify user access
+            org = await self.org_manager.get_organization(org_id)
+            if not org or user_id not in org.get("members", {}):
+                return {"success": False, "error": "Access denied"}
+            
+            # Get collection metadata
+            collection_meta = await asyncio.to_thread(
+                self.collections_metadata.find_one,
+                {"org_id": org_id, "collection_name": collection_name}
+            )
+            
+            if not collection_meta:
+                return {"success": False, "error": "Collection not found"}
+            
+            # Verify team access
+            team_id = collection_meta.get("team_id")
+            if team_id:
+                user_team_id = org.get("members", {}).get(user_id, {}).get("team_id")
+                if user_team_id != team_id and org.get("owner_id") != user_id:
+                    return {"success": False, "error": "Access denied"}
+            
+            # Get all documents
+            docs = await asyncio.to_thread(
+                lambda: list(self.documents_collection.find(
+                    {"collection_id": collection_meta["collection_id"]}
+                ))
+            )
+            
+            # Format for export
+            export_docs = []
+            for doc in docs:
+                export_docs.append({
+                    "doc_id": doc["doc_id"],
+                    "text": doc.get("document_text"),
+                    "metadata": doc.get("metadata", {}),
+                    "uploaded_by": doc.get("uploaded_by"),
+                    "uploaded_at": doc.get("uploaded_at").isoformat() if doc.get("uploaded_at") else None
+                })
+            
+            export_metadata = {
+                "collection_name": collection_name,
+                "description": collection_meta.get("description", ""),
+                "team_id": team_id,
+                "created_by": collection_meta.get("created_by"),
+                "created_at": collection_meta.get("created_at").isoformat() if collection_meta.get("created_at") else None,
+                "exported_by": user_id,
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "document_count": len(export_docs)
+            }
+            
+            return {
+                "success": True,
+                "documents": export_docs,
+                "metadata": export_metadata
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+# Global instance
+kb_manager = None
+
+
+def initialize_kb_manager(
+    chroma_client: chromadb.Client,
+    mongo_client: MongoClient,
+    org_manager,
+    embedding_function=None,
+    database_name: str = "knowledge_base"
+) -> KnowledgeBaseManager:
+    """
+    Initialize the global knowledge base manager
+    
+    Args:
+        chroma_client: ChromaDB client
+        mongo_client: MongoDB client
+        org_manager: OrganizationManager instance
+        embedding_function: Optional embedding function
+        database_name: MongoDB database name
+    
+    Returns:
+        KnowledgeBaseManager instance
+    """
+    global kb_manager
+    kb_manager = KnowledgeBaseManager(
+        chroma_client=chroma_client,
+        mongo_client=mongo_client,
+        org_manager=org_manager,
+        embedding_function=embedding_function,
+        database_name=database_name
+    )
+    
+    return kb_manager
 
 
 # Convenience functions
-_kb_manager = None
+async def create_collection(
+    org_id: str,
+    collection_name: str,
+    description: str,
+    user_id: str,
+    team_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Create a new collection"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.create_collection(org_id, collection_name, description, user_id, team_id, metadata)
 
-def get_kb_manager():
-    """Get or create singleton KnowledgeBaseManager"""
-    global _kb_manager
-    if _kb_manager is None:
-        _kb_manager = KnowledgeBaseManager()
-    return _kb_manager
 
-def create_knowledge_base(user_id: str, collection_name: str, file_paths: List[str]) -> Dict[str, Any]:
-    return get_kb_manager().create_user_knowledge_base(user_id, collection_name, file_paths)
+async def upload_documents(
+    org_id: str,
+    collection_name: str,
+    documents: List[str],
+    user_id: str,
+    metadatas: Optional[List[Dict[str, Any]]] = None,
+    ids: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Upload documents to a collection"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.upload_documents(org_id, collection_name, documents, user_id, metadatas, ids)
 
-def query_knowledge_base(user_id: str, collection_name: str, query: str, n_results: int = 5) -> Dict[str, Any]:
-    return get_kb_manager().query_collection(user_id, collection_name, query, n_results)
 
-def get_active_collection(user_id: str) -> Optional[str]:
-    return get_kb_manager()._get_active_collection(user_id)
+async def query_documents(
+    org_id: str,
+    collection_name: str,
+    query_text: str,
+    user_id: str,
+    n_results: int = 5,
+    where: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Query documents"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.query_documents(org_id, collection_name, query_text, user_id, n_results, where)
 
-def set_active_collection(user_id: str, collection_name: str):
-    return get_kb_manager()._set_active_collection(collection_name, user_id)
 
-def get_user_collections(user_id: str) -> List[Dict[str, Any]]:
-    return get_kb_manager().get_user_collections(user_id)
+async def list_collections(
+    org_id: str,
+    user_id: str,
+    team_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """List accessible collections"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.list_collections(org_id, user_id, team_id)
 
-def delete_file(user_id: str, collection_name: str, filename: str) -> Dict[str, Any]:
-    return get_kb_manager().delete_file_from_collection(user_id, collection_name, filename)
 
-def delete_collection(user_id: str, collection_name: str) -> Dict[str, Any]:
-    return get_kb_manager().delete_knowledge_base(user_id, collection_name)
+async def delete_collection(
+    org_id: str,
+    collection_name: str,
+    user_id: str
+) -> Dict[str, Any]:
+    """Delete a collection"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.delete_collection(org_id, collection_name, user_id)
 
-def add_files(user_id: str, collection_name: str, file_paths: List[str]) -> Dict[str, Any]:
-    return get_kb_manager().add_files_to_collection(user_id, collection_name, file_paths)
+
+async def delete_documents(
+    org_id: str,
+    collection_name: str,
+    document_ids: List[str],
+    user_id: str
+) -> Dict[str, Any]:
+    """Delete specific documents from a collection"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.delete_documents(org_id, collection_name, document_ids, user_id)
+
+
+async def get_collection_stats(
+    org_id: str,
+    collection_name: str,
+    user_id: str
+) -> Dict[str, Any]:
+    """Get collection statistics"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.get_collection_stats(org_id, collection_name, user_id)
+
+
+async def update_collection(
+    org_id: str,
+    collection_name: str,
+    user_id: str,
+    new_name: Optional[str] = None,
+    new_description: Optional[str] = None,
+    new_metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Update collection metadata"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.update_collection(org_id, collection_name, user_id, new_name, new_description, new_metadata)
+
+
+async def get_document(
+    org_id: str,
+    document_id: str,
+    user_id: str
+) -> Dict[str, Any]:
+    """Get a specific document by ID"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.get_document(org_id, document_id, user_id)
+
+
+async def update_document(
+    org_id: str,
+    document_id: str,
+    user_id: str,
+    new_text: Optional[str] = None,
+    new_metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Update a document's text or metadata"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.update_document(org_id, document_id, user_id, new_text, new_metadata)
+
+
+async def search_all_collections(
+    org_id: str,
+    query_text: str,
+    user_id: str,
+    n_results: int = 5,
+    team_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Search across all accessible collections"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.search_all_collections(org_id, query_text, user_id, n_results, team_id)
+
+
+async def batch_upload_documents(
+    org_id: str,
+    collection_name: str,
+    user_id: str,
+    documents: List[str],
+    batch_size: int = 100,
+    metadatas: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """Upload documents in batches"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.batch_upload_documents(org_id, collection_name, user_id, documents, batch_size, metadatas)
+
+
+async def get_documents_by_metadata(
+    org_id: str,
+    collection_name: str,
+    user_id: str,
+    metadata_filter: Dict[str, Any],
+    limit: int = 100
+) -> Dict[str, Any]:
+    """Get documents by metadata filter"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.get_documents_by_metadata(org_id, collection_name, user_id, metadata_filter, limit)
+
+
+async def export_collection(
+    org_id: str,
+    collection_name: str,
+    user_id: str
+) -> Dict[str, Any]:
+    """Export all documents from a collection"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.export_collection(org_id, collection_name, user_id)

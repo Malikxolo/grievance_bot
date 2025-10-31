@@ -21,32 +21,63 @@ import requests
 from chroma_log_handler import ChromaLogHandler
 from dotenv import load_dotenv
 import aiohttp
+from core.path_security import validate_safe_path, create_safe_user_path, sanitize_filename, sanitize_path_component
 from core.google_drive_integration import render_multi_account_drive_picker, cleanup_multi_account_session
 from core.organization_manager import (
     create_organization, 
     join_organization, 
     check_permission,
     get_organization,
-    org_manager
+    initialize_org_manager
 )
 
+org_manager = initialize_org_manager()
 
 load_dotenv()
 
-def upload_local_files(user_id: str, collection_name: str, files):
+import requests
 
+
+
+def upload_local_files(user_id: str, collection_name: str, file_paths: list[str]):
+    """
+    Uploads local files to the /api/collections/create/local endpoint.
+    
+    Args:
+        user_id (str): The user ID.
+        collection_name (str): The name of the collection.
+        file_paths (list[str]): List of file paths to upload.
+
+    Returns:
+        dict: The JSON response from the server.
+    """
     url = "http://localhost:8030/api/collections/create/local"
+
+    
     form_data = {
         "user_id": user_id,
         "collection_name": collection_name,
     }
-    files_data = [
-        ("files", (uploaded_file.name, uploaded_file.read(), uploaded_file.type or "application/octet-stream"))
-        for uploaded_file in files
-    ]
 
-    response = requests.post(url, data=form_data, files=files_data)
+    
+    files_data = []
+    for file_path in file_paths:
+        mime_type = "application/pdf" if file_path.endswith(".pdf") else "application/octet-stream"
+        files_data.append(("files", (file_path.split("/")[-1], open(file_path, "rb"), mime_type)))
+
+    headers = {
+        "accept": "application/json",
+    
+    }
+
+    response = requests.post(url, data=form_data, files=files_data, headers=headers)
+
+    
+    for _, file_tuple in files_data:
+        file_tuple[1].close()
+
     return response.json()
+
 
 async def mog_query(user_id: str, chat_history:List, query: str):
     url = "http://localhost:8030/api/chat"
@@ -298,23 +329,27 @@ def get_user_collections(user_id: str) -> List[str]:
     
 def display_collection_name(user_id: str, namespaced_name: str) -> str:
     """Show clean collection names to users"""
-    from core.knowledge_base import get_display_collection_name
-    return get_display_collection_name(user_id, namespaced_name)
+    from core.knowledge_base import get_active_collection
+    return get_active_collection(user_id, namespaced_name)
 
-def create_collection(target_id: str, collection_name: str, files: List):
+def create_collection(user_id: str, collection_name: str, files: List):
     """Create new collection from uploaded files - ENHANCED VERSION WITH CLOUD CLEANUP"""
     try:
-        from core.knowledge_base import kb_manager
-        from core.knowledge_base import create_knowledge_base
+        from core.knowledge_base import get_kb_manager, create_knowledge_base
+        kb_manager = get_kb_manager()
         
-        user_path = f"db_collection/{target_id}"
+        safe_user_id = sanitize_path_component(user_id)
+        safe_collection_name = sanitize_path_component(collection_name)
+        
+        
+        user_path = create_safe_user_path("db_collection", safe_user_id)
         os.makedirs(user_path, exist_ok=True)
         
-        # STEP 1: Delete ALL existing Chroma Cloud collections for this user
+        
         try:
             client = kb_manager._get_chroma_client()
             all_collections = client.list_collections()
-            user_prefix = f"{target_id}_"
+            user_prefix = f"{safe_user_id}_"
             
             for collection in all_collections:
                 if collection.name.startswith(user_prefix):
@@ -347,8 +382,8 @@ def create_collection(target_id: str, collection_name: str, files: List):
         
         logger.info(f"Saved {len(files)} files for processing")
         
-        # STEP 4: Create vector database using your knowledge_base.py logic
-        result = create_knowledge_base(target_id, collection_name, file_paths)
+        
+        result = create_knowledge_base(safe_user_id, safe_collection_name, file_paths)
         
         if result["success"]:
             logger.info(f"Knowledge base created successfully: {safe_collection_name}")
@@ -366,7 +401,7 @@ def create_collection(target_id: str, collection_name: str, files: List):
         logger.error(f"Failed to create collection: {e}")
         return False
 
-def show_create_org_form():
+async def show_create_org_form():
     """Form to create new organization"""
     st.header("🏢 Create Organization")
     
@@ -396,7 +431,7 @@ def show_create_org_form():
                 st.error("Please fill in all fields")
             else:
                 user_id = get_user_id()
-                result = create_organization(org_name, user_name, user_id)
+                result = await create_organization(org_name, user_name, user_id)
                 
                 if result["success"]:
                     st.session_state.org_id = result["org_id"]
