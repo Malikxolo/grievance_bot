@@ -28,6 +28,7 @@ from core.knowledge_base import (
     get_org_cache,
     get_collection_cache,
     embedding_functions,
+    load_documents_from_files,
     kb_manager
 )
 
@@ -400,76 +401,82 @@ async def upload_documents_endpoint(
     files: List[UploadFile] = File(...)
 ):
     """
-    Upload documents/files to a collection.
-    Processes files and stores them as searchable documents.
+    Upload and process documents for a collection.
+    Uses the advanced `load_documents_from_files` for comprehensive file support.
+    Automatically handles temp cleanup and metadata preservation.
     """
     try:
-        documents = []
+        
+        documents = await load_documents_from_files(files)
+
+        if not documents:
+            return JSONResponse(
+                content={"error": "No valid documents could be processed."},
+                status_code=400
+            )
+
+        
         metadatas = []
+        chunks = []
+        max_chunk_size = 1000
+
+        for doc in documents:
+            text = doc.page_content or ""
+            metadata = doc.metadata or {}
+            filename = metadata.get("source", "unknown")
+
+            # Chunk text safely
+            text_chunks = [text[i:i+max_chunk_size] for i in range(0, len(text), max_chunk_size)]
+            total_chunks = len(text_chunks)
+
+            for i, chunk in enumerate(text_chunks):
+                chunks.append(chunk)
         
-        # Process each uploaded file
-        for file in files:
-            content = await file.read()
-            
-            # Handle different file types
-            if file.filename.endswith('.txt'):
-                text = content.decode('utf-8')
-            elif file.filename.endswith('.pdf'):
-                # You'll need to implement PDF extraction
-                from PyPDF2 import PdfReader
-                import io
-                pdf_reader = PdfReader(io.BytesIO(content))
-                text = "\n".join([page.extract_text() for page in pdf_reader.pages])
-            elif file.filename.endswith('.json'):
-                text = content.decode('utf-8')
-            else:
-                text = content.decode('utf-8', errors='ignore')
-            
-            # Chunk the document if it's too large
-            # Simple chunking - you may want more sophisticated chunking
-            max_chunk_size = 1000
-            chunks = [text[i:i+max_chunk_size] for i in range(0, len(text), max_chunk_size)]
-            
-            for i, chunk in enumerate(chunks):
-                documents.append(chunk)
                 metadatas.append({
-                    "filename": file.filename,
+                    **metadata,
                     "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "file_type": file.filename.split('.')[-1]
+                    "total_chunks": total_chunks,
+                    "filename": filename
                 })
+
+        if not chunks:
+            return JSONResponse(
+                content={"error": "No text content found in uploaded documents."},
+                status_code=400
+            )
+
         
-        # Upload to knowledge base
         result = await upload_documents(
             org_id=org_id,
             collection_name=collection_name,
-            documents=documents,
+            documents=chunks,
             user_id=user_id,
             metadatas=metadatas
         )
-        
+
+        # Step 4: Return response
         if result.get("success"):
             return JSONResponse(
                 content={
-                    "message": f"Successfully uploaded {len(files)} file(s) with {result.get('count')} chunks",
+                    "message": f"Uploaded {len(files)} file(s) "
+                               f"({len(chunks)} chunks total).",
                     "document_ids": result.get("document_ids"),
-                    "total_chunks": result.get("count")
-                }, 
+                    "total_chunks": result.get("count", len(chunks))
+                },
                 status_code=200
             )
         else:
             return JSONResponse(
-                content={"error": result.get("error")}, 
+                content={"error": result.get("error", "Upload failed.")},
                 status_code=400
             )
-            
+
     except Exception as e:
-        logging.error(f"Error uploading documents: {e}")
+        logging.error(f"Error uploading documents: {e}", exc_info=True)
         return JSONResponse(
-            content={"error": str(e)}, 
+            content={"error": str(e)},
             status_code=500
         )
-
 
 @router.post("/organizations/{org_id}/collections/{collection_name}/upload-text")
 async def upload_text_documents_endpoint(
