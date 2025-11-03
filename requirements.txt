@@ -27,6 +27,7 @@ PyJWT>=2.0.0
 # PDF and DOCX support for LangChain
 pypdf>=3.0.0
 unstructured
+unstructured[ppt]
 
 #google Oauth
 google-api-python-client>=2.0.0

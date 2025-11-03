@@ -14,8 +14,26 @@ from pymongo import MongoClient
 import hashlib
 import logging
 from os import getenv, path
+from fastapi import UploadFile
+from langchain.schema import Document
 from redis.asyncio import Redis
+import tempfile
+import shutil
+
 logger = logging.getLogger(__name__)
+
+try:
+    from unstructured.partition.auto import partition
+    UNSTRUCTURED_AVAILABLE = True
+except ImportError:
+    UNSTRUCTURED_AVAILABLE = False
+
+try:
+    from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader, TextLoader
+    PDF_SUPPORT = True
+    DOCX_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = DOCX_SUPPORT = False
 
 
 class KnowledgeBaseManager:
@@ -1361,6 +1379,115 @@ class KnowledgeBaseManager:
 
 # Global instance
 kb_manager = None
+
+
+
+
+async def load_documents_from_files(files: List[UploadFile]) -> List[Document]:
+    """
+    Load documents from FastAPI UploadFile inputs with comprehensive format support.
+    Automatically cleans up temporary files after processing.
+    """
+    documents = []
+    
+    # Create a temporary working directory (auto-cleaned later)
+    temp_dir = tempfile.mkdtemp(prefix="uploaded_docs_")
+    logger.info(f"Temporary directory created: {temp_dir}")
+
+    try:
+        for upload in files:
+            filename = upload.filename
+            file_extension = path.splitext(filename)[1].lower()
+            file_path = path.join(temp_dir, filename)
+
+            # Save uploaded file temporarily
+            try:
+                with open(file_path, "wb") as f:
+                    f.write(await upload.read())
+            except Exception as e:
+                logger.error(f"Error saving file {filename}: {e}")
+                continue
+
+            logger.info(f"Processing file: {filename} ({file_extension})")
+
+            try:
+                # --- Use unstructured for rich formats ---
+                if UNSTRUCTURED_AVAILABLE and file_extension in [
+                    '.md', '.rtf', '.csv', '.tsv', '.json',
+                    '.xlsx', '.xls', '.xlsm', '.xlsb', '.xltx', '.xltm',
+                    '.docm', '.dotx', '.dotm', '.dot',
+                    '.ppt', '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm',
+                    '.html', '.htm', '.xml',
+                    '.odt', '.ods', '.odp',
+                    '.mdb', '.accdb', '.epub', '.msg', '.eml'
+                ]:
+                    elements = partition(filename=file_path)
+                    content = "\n\n".join(str(el) for el in elements)
+                    doc = Document(
+                        page_content=content,
+                        metadata={
+                            "source": filename,
+                            "file_type": file_extension,
+                            "elements_count": len(elements)
+                        }
+                    )
+                    documents.append(doc)
+                    logger.info(f"Loaded via unstructured: {filename}")
+
+                elif file_extension == '.txt':
+                    loader = TextLoader(file_path, encoding="utf-8")
+                    file_docs = loader.load()
+                    for doc in file_docs:
+                        doc.metadata["source"] = filename
+                    documents.extend(file_docs)
+
+                elif file_extension == '.pdf':
+                    if PDF_SUPPORT:
+                        loader = PyPDFLoader(file_path)
+                        file_docs = loader.load()
+                        for doc in file_docs:
+                            doc.metadata["source"] = filename
+                        documents.extend(file_docs)
+                    else:
+                        logger.error("PDF support not available")
+
+                elif file_extension in ['.doc', '.docx']:
+                    if DOCX_SUPPORT:
+                        loader = UnstructuredWordDocumentLoader(file_path)
+                        file_docs = loader.load()
+                        for doc in file_docs:
+                            doc.metadata["source"] = filename
+                        documents.extend(file_docs)
+                    else:
+                        logger.error("DOCX support not available")
+
+                else:
+                    logger.warning(f"Unsupported file type: {file_extension}")
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                encryption_keywords = [
+                    'encrypt', 'password', 'decrypt', 'protected',
+                    'badzipfile', 'pdfdecryptionerror', 'pdfreaderror',
+                    'bad magic number', 'file is encrypted',
+                    'bad password', 'document is password protected',
+                    'file has not been decrypted'
+                ]
+                if any(keyword in error_msg for keyword in encryption_keywords):
+                    logger.error(f"❌ ENCRYPTED FILE: '{filename}' is password-protected.")
+                else:
+                    logger.error(f"Error processing {filename}: {e}")
+
+    finally:
+        
+        try:
+            shutil.rmtree(temp_dir)
+            logger.info(f"Cleaned up temp directory: {temp_dir}")
+        except Exception as cleanup_err:
+            logger.warning(f"Failed to delete temp dir {temp_dir}: {cleanup_err}")
+
+    logger.info(f"✅ Processed {len(documents)} documents from {len(files)} uploads")
+    return documents
 
 
 def initialize_kb_manager(
