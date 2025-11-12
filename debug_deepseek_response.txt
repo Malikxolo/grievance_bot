@@ -1,197 +1,111 @@
-First, I need to analyze the user query: "What's the weather like in Tokyo next week?" The date is November 12, 2025. I have to think step by step using multi-dimensional reasoning.
+First, the user query is: "what is weatherin lucknow give me in depth by analying aqi and humidity". I need to correct the typos: it's "weather in Lucknow" and "analyzing AQI and humidity". So, they want the weather in Lucknow, with an in-depth analysis including AQI (Air Quality Index) and humidity.
 
-**1. WHAT DOES THE USER REALLY WANT?**
-- Literally, they want the weather forecast for Tokyo for the upcoming week.
-- Their actual goal might be planning activities, travel, or daily routines.
-- Emotional state: Probably casual, planning-oriented, not urgent or distressed.
-- This seems like a single request, but I need to expand on it.
+Now, I must think step by step using the multi-dimensional reasoning approach.
 
-**2. INFORMATION QUALITY CHECK - THINK BEYOND THE OBVIOUS**
-- If I just give the weather forecast, will it be complete? No, because they might need more context.
-- What did the user NOT mention but would obviously need? Things like:
-  - Specific days (daily breakdown).
-  - Temperature ranges.
-  - Precipitation chances.
-  - Humidity, wind speed.
-  - Any weather alerts or warnings.
-  - How the weather might affect plans (e.g., if it's rainy, suggest indoor activities).
-- Alternatives or related options: Compare to other cities, suggest best times to visit, etc.
-- Context or background: Time of year (November in Tokyo is autumn, so weather might be cool, possibly rainy).
-- Multi-dimensional thinking:
-  - Explicit need: Weather forecast for Tokyo next week.
-  - Implicit need: Planning for events, travel, clothing, etc.
-  - Alternatives: Other locations, different time frames.
-  - Context: Seasonal norms, historical data, impact on activities.
+1. **WHAT DOES THE USER REALLY WANT?**
+   - Literally: Current weather in Lucknow, including AQI and humidity.
+   - Beyond literal: They might be planning an outdoor activity, concerned about health (due to AQI), or need detailed environmental data. Emotional state could be casual or slightly urgent if they're checking for immediate plans. It's one request but has multiple components: weather, AQI, humidity.
 
-Mental process training: Like the laptop example, for weather, I should think about:
-- Weather details (temperature, rain, etc.)
-- Impact on activities (what to do based on weather)
-- Travel considerations (if they're planning a trip)
-- Health aspects (e.g., pollen count, air quality)
-- Comparisons (e.g., vs. average weather)
+2. **INFORMATION QUALITY CHECK - THINK BEYOND THE OBVIOUS**
+   - If I just give current weather, AQI, and humidity, is that complete? Probably not. They asked for "in-depth" analysis, so I should provide more context.
+   - What did they not mention? Possibly temperature trends, forecasts, health implications of AQI, how humidity affects comfort, comparisons to other cities, or recommendations based on the data.
+   - Alternatives: Other weather metrics like wind speed, precipitation, UV index.
+   - Related information: How to interpret AQI levels, best times to go out based on weather, historical data.
+   - Multi-dimensional thinking:
+     - Explicit need: Current weather, AQI, humidity in Lucknow.
+     - Implicit need: Health advice, activity suggestions, forecast for planning.
+     - Alternatives: Other locations or times.
+     - Context: Lucknow's climate, seasonal norms, air quality trends.
 
-So, dimensions could be:
-- Daily weather forecast
-- Weekly summary
-- Historical averages
-- Activity recommendations based on weather
-- Travel tips for Tokyo in November
-- Health-related info (air quality, etc.)
+   Mental process: User asks for weather with AQI and humidity. So, dimensions could be:
+     - Current weather data (temperature, humidity, etc.)
+     - AQI details (levels, pollutants, health effects)
+     - Humidity impact (comfort level, dew point)
+     - Forecast for future planning
+     - Historical context or averages
+     - Health recommendations based on AQI and humidity
+     - Comparisons or trends
 
-I need to create separate searches for each dimension. The instruction says: "If you're generating less than 5 searches for a complex query, you're missing dimensions." This query isn't super complex, but I should aim for multiple dimensions.
+   I should create separate searches for each dimension.
 
-**3. IS THIS A BUSINESS PROBLEM?**
-- The user is asking about weather, which seems personal, not related to Mochan-D's business context.
-- Long-term context is about Series A funding, but the query doesn't connect to that.
-- Conversation history is empty.
-- So, probably not a business problem. Just answer directly.
-- But the core principle is to think like a consultant, so I should consider if there's any indirect business angle. However, weather query is straightforward personal use.
+3. **IS THIS A BUSINESS PROBLEM?**
+   - This seems like a personal query about weather. Not directly related to business, customer support, or automation. No indication of business context. So, probably not a business problem. I'll set business_opportunity.detected to false.
 
-**4. MULTI-DIMENSIONAL TASK BREAKDOWN**
-- Step 1: Literally asked for: Weather in Tokyo next week.
-- Step 2: Implied: Need for detailed forecast, possibly for planning.
-- Step 3: Alternatives: Other cities, different weeks.
-- Step 4: Related information: Seasonal weather, travel advice, activity suggestions.
-- Step 5: Expert inclusion: Include weather trends, alerts, and practical tips.
+4. **MULTI-DIMENSIONAL TASK BREAKDOWN**
+   - Step 1: Literally asked for weather in Lucknow with AQI and humidity analysis.
+   - Step 2: Implied: Need for comprehensive environmental data, health insights, maybe planning advice.
+   - Step 3: Alternatives: Other metrics, forecasts.
+   - Step 4: Related: Climate info, safety tips.
+   - Step 5: Expert touch: Include health advisories, trend analysis.
 
-Dimensions I identified:
-1. Daily weather forecast for Tokyo for each day next week.
-2. Weekly summary or trends.
-3. Historical weather in Tokyo in November for context.
-4. Impact on activities (e.g., best things to do in Tokyo based on weather).
-5. Travel tips for Tokyo in autumn.
-6. Health-related info like air quality.
+   Dimensions I identified:
+     - Current weather conditions in Lucknow
+     - Current AQI in Lucknow
+     - Current humidity levels and effects
+     - Weather forecast for Lucknow
+     - AQI interpretation and health impacts
+     - Humidity comfort levels
+     - Historical weather/AQI data for context
+     - Recommendations based on data
 
-Since it's a weather query, I should focus on weather-specific dimensions. The user might be planning a trip, so travel-related info could be valuable.
+   For a complex query, I should aim for 5-7 searches. Let's list them:
+     - web_search_0: "Lucknow weather today 2025" (for current weather)
+     - web_search_1: "Lucknow AQI today 2025" (for air quality)
+     - web_search_2: "Lucknow humidity levels 2025" (for humidity)
+     - web_search_3: "Lucknow weather forecast 2025" (for forecast)
+     - web_search_4: "AQI health effects Lucknow" (for interpretation)
+     - web_search_5: "humidity comfort index" (for context)
+     - web_search_6: "Lucknow climate averages" (for historical context)
 
-For searches, I'll use web_search because weather is time-sensitive and changes. RAG might not have current weather data.
+   That's 7 searches, which seems generous. I can consolidate if needed, but the instruction is to be generous and not merge dimensions.
 
-**5. HOW TO FORMAT QUERIES**
-- web_search: Short, keyword-focused, under 6-8 words, include year if time-sensitive.
-- For this, since it's 2025, I should include the year for accuracy.
+   Also, since this is time-sensitive (weather changes), I must use web_search to validate current data. Base data for definitions, but current info needs web_search.
 
-Example queries:
-- "Tokyo weather forecast next week 2025"
-- "Tokyo November 2025 weather"
-- "Tokyo weekly weather outlook"
-- "Things to do in Tokyo November weather"
-- "Tokyo air quality November 2025"
+5. **HOW TO FORMAT QUERIES**
+   - For web_search: Short, keyword-focused, under 6-8 words, include year 2025.
+   - For rag: If business context, but here it's not, so probably no rag needed.
 
-I need to keep them short.
+6. **TOOL ORCHESTRATION**
+   - Tools available: web_search, rag, calculator.
+   - This query doesn't need rag since no business context.
+   - No calculations needed, so calculator not required.
+   - All web_search queries can run in parallel since they don't depend on each other.
 
-**6. TOOL ORCHESTRATION**
-- Tools available: web_search, rag, calculator.
-- For this query, web_search is needed for current weather data.
-- RAG might not be relevant unless there's business context, but I don't see any.
-- Calculator isn't needed.
-- Dependencies: No, I can run web_search queries in parallel since they don't depend on each other.
-- So, mode should be parallel.
-
-**7. HOW SHOULD THE RESPONSE FEEL?**
-- User tone: Casual, planning-oriented.
-- Personality: Helpful, informative, maybe empathetic if they're planning something.
-- Detail level: Moderate to comprehensive, since they might need details for planning.
-- Language style: Casual English or professional, but since it's a chatbot, casual might be better.
+7. **HOW SHOULD THE RESPONSE FEEL?**
+   - User's tone: Casual, with typos ("weatherin", "analying"), so probably casual or slightly rushed.
+   - Personality: Helpful, informative, perhaps empathetic if health concerns.
+   - Detail: Comprehensive since they asked for "in-depth".
+   - Language: Casual English or Hinglish, but since it's a weather query, professional might be fine, but casual could be better.
 
 Now, for the JSON structure:
 
-- multi_task_analysis: Is this multiple tasks? Probably not, it's a single query, but I can break it into sub-tasks for dimensions.
-  - multi_task_detected: false, since it's one main task.
-  - sub_tasks: Could list the dimensions as sub-tasks, but the field is for if multiple distinct tasks are detected. Here, it's one task with multiple aspects.
+- multi_task_analysis: Is this multiple tasks? Yes, it involves weather, AQI, humidity. So, sub_tasks: ["current weather data", "AQI analysis", "humidity analysis"]
+- semantic_intent: Overall goal is to get detailed environmental conditions in Lucknow for informed decision-making.
+- expansion_reasoning: Why I'm adding more searches – because user asked for in-depth analysis, so need to cover multiple dimensions.
+- business_opportunity: Detected false, as it's personal.
+- tools_to_use: ["web_search"] since no rag or calculator needed.
+- tool_execution: Mode parallel, order doesn't matter, dependency reason empty.
+- enhanced_queries: List of web_search queries.
+- tool_reasoning: Why these tools – web_search for current, changing data.
+- sentiment: Primary emotion casual, intensity medium (not urgent, but detailed request).
+- response_strategy: Personality helpful_dost, length detailed, language casual or English, tone friendly.
+- key_points_to_address: List the main points to cover in response.
 
-Looking at the JSON: "multi_task_detected": true or false, and "sub_tasks": list. If it's not multiple tasks, I should set it to false and sub_tasks might be empty or not needed, but the structure includes it.
+Key points:
+- Current temperature, conditions
+- AQI level and what it means
+- Humidity percentage and comfort
+- Forecast
+- Health tips if AQI is poor
+- General advice
 
-In the example, for a single task, it might be false. But I need to describe the semantic intent.
+Now, ensure JSON is exact.
 
-- semantic_intent: Overall user goal – to get weather information for planning purposes in Tokyo next week.
+Final checks:
+- Did I find all dimensions? Yes, I think so.
+- Am I generous? 7 searches for web_search.
+- Proper key names: rag_0 if used, but not, so only web_search.
+- For complex queries, at least 5-7 searches: I have 7.
+- Exact JSON structure.
 
-- expansion_reasoning: Why I'm adding more searches – because just the forecast isn't enough; they need context, impact, etc.
-
-- business_opportunity: Detected? Probably false, as it's not business-related.
-  - composite_confidence: 0-100, so if not detected, low confidence.
-  - engagement_level: Based on signals, if no business, perhaps "pure_empathy".
-  - signal_breakdown: All low since not business.
-  - recommended_approach: "empathy_first" or just answer.
-  - pain_points and solution_areas: Empty or not applicable.
-
-- tools_to_use: Probably ["web_search"] since weather is current data.
-
-- tool_execution: mode "parallel", order ["web_search_0", "web_search_1", ...], dependency_reason empty.
-
-- enhanced_queries: List of rag and web_search queries. Since no rag needed, only web_search.
-
-- tool_reasoning: Why these tools – web_search for current weather data.
-
-- sentiment: primary_emotion "casual", intensity "low".
-
-- response_strategy: personality "helpful_dost" or "patient_guide", length "medium", language "english" or "casual", tone "friendly".
-
-- key_points_to_address: List of points from the dimensions.
-
-Now, let's list the dimensions and queries:
-
-Dimensions:
-1. Current weather forecast for Tokyo next week – daily details.
-2. Historical context for November in Tokyo.
-3. Activity recommendations based on weather.
-4. Travel tips for Tokyo in autumn.
-5. Health aspects like air quality.
-
-Queries:
-- web_search_0: "Tokyo weather forecast next week 2025"
-- web_search_1: "Tokyo November 2025 average weather"
-- web_search_2: "Things to do in Tokyo November"
-- web_search_3: "Tokyo travel tips autumn 2025"
-- web_search_4: "Tokyo air quality November 2025"
-
-That's 5 searches, which seems good for a complex query. But is weather query that complex? Maybe I can reduce, but the instruction says to be generous, so 5 is fine.
-
-For rag, since no business context, I might not use it. But the long-term context is about Series A funding, which is unrelated. So, probably no rag query.
-
-Calculator not needed.
-
-Now, for business_opportunity:
-- detected: false
-- composite_confidence: 0 (since no business signal)
-- engagement_level: "pure_empathy" (as per options: direct_consultation, gentle_suggestion, empathetic_probing, pure_empathy)
-- signal_breakdown: all 0
-- recommended_approach: "empathy_first"
-- pain_points: [] (empty array)
-- solution_areas: [] (empty array)
-
-For multi_task_analysis:
-- multi_task_detected: false (it's one task: get weather info)
-- sub_tasks: [] or perhaps describe the aspects, but the field is for sub-tasks if multiple tasks are detected. I'll set to false and empty array.
-
-Semantic_intent: "To obtain detailed weather information for Tokyo during the upcoming week for planning purposes, including forecasts, historical context, and practical implications."
-
-Expansion_reasoning: "The user's query is straightforward but can be enhanced with multi-dimensional information such as daily forecasts, historical averages, activity suggestions, and health-related data to provide a comprehensive response for better planning."
-
-Tools_to_use: ["web_search"] since only web_search is needed.
-
-Tool_execution: mode "parallel", order ["web_search_0", "web_search_1", "web_search_2", "web_search_3", "web_search_4"], dependency_reason: "" (empty)
-
-Enhanced_queries: only web_search queries, no rag.
-
-Tool_reasoning: "Web search is necessary to retrieve current and accurate weather data, forecasts, and related information that changes frequently and is not available in static knowledge bases."
-
-Sentiment: primary_emotion "casual", intensity "low" (assuming no urgency)
-
-Response_strategy: 
-- personality: "helpful_dost" (friendly and helpful)
-- length: "medium" (provide details but not overly long)
-- language: "english" (since query is in English)
-- tone: "friendly"
-
-Key_points_to_address: From dimensions, e.g., 
-- Daily weather forecast
-- Temperature ranges
-- Precipitation chances
-- Historical context
-- Activity recommendations
-- Travel tips
-- Air quality if relevant
-
-Now, ensure JSON is exact structure.
-
-Output only JSON, no other text.
+Output only JSON.

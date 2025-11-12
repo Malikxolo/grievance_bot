@@ -79,9 +79,10 @@ logger = logging.getLogger(__name__)
 class OptimizedAgent:
     """Single-pass agent that minimizes LLM calls while maintaining all functionality"""
     
-    def __init__(self, brain_llm, heart_llm, tool_manager):
-        self.brain_llm = brain_llm
-        self.heart_llm = heart_llm
+    def __init__(self, brain_llm, heart_llm, tool_manager, router_llm=None):
+        self.brain_llm = brain_llm  # Qwen CoT for complex analysis
+        self.heart_llm = heart_llm  # Llama for response generation
+        self.router_llm = router_llm if router_llm else heart_llm  # Dedicated router or fallback to heart
         self.tool_manager = tool_manager
         self.available_tools = tool_manager.get_available_tools()
         self.memory = AsyncMemory(config)
@@ -92,6 +93,7 @@ class OptimizedAgent:
         self.cache_manager = RedisCacheManager()
         
         logger.info(f"OptimizedAgent initialized with tools: {self.available_tools}")
+        logger.info(f"Router LLM: {'DEDICATED ✅' if router_llm else 'SHARED (heart_llm) ⚠️'}")
         logger.info(f"Redis caching: {'ENABLED ✅' if self.cache_manager.enabled else 'DISABLED ⚠️'}")
     
     async def process_query(self, query: str, chat_history: List[Dict] = None, user_id: str = None, mode:str = None) -> Dict[str, Any]:
@@ -110,6 +112,7 @@ class OptimizedAgent:
         cached_analysis = None
         analysis = None
         analysis_time = 0.0
+        needs_cot = None  # Track which analysis path was taken
         
         try:
             # STEP 1: Check cache or analyze
@@ -119,6 +122,7 @@ class OptimizedAgent:
                 logger.info(f"🎯 USING CACHED ANALYSIS - Skipping Brain LLM call")
                 analysis = cached_analysis
                 analysis_time = 0.0  # Cache hit = instant
+                needs_cot = None  # Unknown for cached analysis
             else:
                 # Retrieve memories
                 eli = time.time()
@@ -151,8 +155,18 @@ class OptimizedAgent:
                 logger.info(f" Retrieved memories: {memories}")
                 analysis_start = datetime.now()
                 
-                # Perform analysis
-                analysis = await self._comprehensive_analysis(query, chat_history, memories)
+                # ROUTING LAYER: Decide which analysis path to take
+                routing_decision = await self._route_query(query, chat_history, memories)
+                needs_cot = routing_decision.get('needs_cot', True)
+                
+                # Route to appropriate analysis function
+                if needs_cot:
+                    logger.info(f"💰 COST PATH: COMPLEX (Qwen CoT) - Deep reasoning required")
+                    analysis = await self._comprehensive_analysis(query, chat_history, memories)
+                else:
+                    logger.info(f"💰 COST PATH: SIMPLE (Llama Fast) - Straightforward query")
+                    analysis = await self._simple_analysis(query, chat_history, memories)
+                
                 analysis_time = (datetime.now() - analysis_start).total_seconds()
                 logger.info(f" Analysis completed in {analysis_time:.2f}s")
                 
@@ -275,12 +289,20 @@ class OptimizedAgent:
             total_time = (datetime.now() - start_time).total_seconds()
             
             # Count actual LLM calls
-            llm_calls = 2 if not cached_analysis else 1  # Brain skipped if cached + Heart
-            if execution_mode == 'sequential' and not cached_analysis:
-                llm_calls += 1  # Middleware
+            if cached_analysis:
+                llm_calls = 1  # Only Heart (response generation)
+                analysis_path = "CACHED"
+            else:
+                llm_calls = 1  # Router
+                llm_calls += 1  # Analysis (either CoT or Simple)
+                llm_calls += 1  # Heart (response generation)
+                if execution_mode == 'sequential':
+                    llm_calls += 1  # Middleware for sequential tools
+                analysis_path = "COT" if needs_cot else "SIMPLE"
             
             logger.info(f" TOTAL PROCESSING TIME: {total_time:.2f}s ({llm_calls} LLM calls)")
             logger.info(f" ANALYSIS CACHE: {'HIT ✅' if cached_analysis else 'MISS ❌'}")
+            logger.info(f" ANALYSIS PATH: {analysis_path}")
             
             return {
                 "success": True,
@@ -291,13 +313,15 @@ class OptimizedAgent:
                 "execution_mode": execution_mode,
                 "business_opportunity": analysis.get('business_opportunity', {}),
                 "analysis_cache_hit": bool(cached_analysis),
+                "analysis_path": analysis_path,
                 "tools_cache_hit": False,  # Tools are always executed fresh
                 "processing_time": {
                     "analysis": analysis_time,
                     "tools": tool_time,
                     "response": response_time,
                     "total": total_time
-                }
+                },
+                "llm_calls": llm_calls
             }
             
         except Exception as e:
@@ -370,6 +394,235 @@ class OptimizedAgent:
         }
         
         return guides.get(emotion, {}).get(intensity, "Be naturally helpful and friendly")
+
+    async def _route_query(self, query: str, chat_history: List[Dict] = None, memories: str = "") -> Dict[str, Any]:
+        """
+        Router layer: Decide if query needs Chain-of-Thought reasoning (Qwen) or simple analysis (Llama)
+        Uses Meta Llama 3.3 70B for fast, cost-effective routing decision
+        """
+        context = chat_history[-2:] if chat_history else []
+        
+        routing_prompt = f"""Analyze this query and decide if it needs deep Chain-of-Thought reasoning or simple analysis.
+
+USER QUERY: {query}
+CONVERSATION CONTEXT: {context}
+MEMORIES: {memories if memories else "None"}
+
+Your task: Determine query complexity level.
+
+NEEDS DEEP REASONING (Chain-of-Thought) when query involves:
+- Multiple dimensions requiring expansion thinking
+- Conditional logic with dependencies (if/then/else scenarios)
+- Multi-task decomposition with sequential dependencies
+- Ambiguous intent requiring deep semantic analysis
+- Complex business opportunity assessment with nuanced signals
+- Queries asking for comparisons, alternatives, or multi-angle exploration
+- Strategic thinking or planning required
+
+SIMPLE ANALYSIS when query involves:
+- Greetings, casual conversation
+- Single direct question with clear intent
+- Simple fact retrieval or definition
+- Obvious single tool selection
+- Straightforward information request
+- Already clear context, no ambiguity
+
+Think about:
+1. Does this query have hidden dimensions or is it straightforward?
+2. Does answering this require exploring multiple angles?
+3. Is the intent crystal clear or does it need interpretation?
+4. Will simple pattern matching suffice or is reasoning needed?
+
+Return ONLY valid JSON:
+{{
+  "needs_cot": true or false,
+  "reasoning": "brief explanation of complexity assessment"
+}}"""
+
+        try:
+            logger.info(f"🧭 ROUTING QUERY: '{query[:60]}...'")
+            
+            response = await self.router_llm.generate(
+                messages=[{"role": "user", "content": routing_prompt}],
+                system_prompt="You assess query complexity for routing. Return JSON only.",
+                temperature=0.1,
+                max_tokens=200
+            )
+            
+            json_str = self._extract_json(response)
+            routing_decision = json.loads(json_str)
+            
+            needs_cot = routing_decision.get('needs_cot', True)  # Default to safe path
+            reasoning = routing_decision.get('reasoning', 'Routing decision made')
+            
+            logger.info(f"🧭 ROUTING DECISION: needs_cot={needs_cot}")
+            logger.info(f"   Reason: {reasoning}")
+            logger.info(f"   Path: {'COMPLEX (Qwen CoT)' if needs_cot else 'SIMPLE (Llama Fast)'}")
+            
+            return {
+                "needs_cot": needs_cot,
+                "reasoning": reasoning
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Routing failed: {e}, defaulting to CoT (safe path)")
+            return {
+                "needs_cot": True,  # Safe default
+                "reasoning": f"Routing error: {str(e)}"
+            }
+    
+    async def _simple_analysis(self, query: str, chat_history: List[Dict] = None, memories: str = "") -> Dict[str, Any]:
+        """
+        Fast-path analysis for simple queries using Meta Llama
+        Returns same JSON structure as comprehensive analysis for compatibility
+        """
+        from datetime import datetime
+        
+        context = chat_history[-2:] if chat_history else []
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        analysis_prompt = f"""Analyze this query for Mochan-D - an AI chatbot that automates customer support across WhatsApp, Facebook, Instagram with RAG and web search capabilities.
+
+USER QUERY: {query}
+DATE: {current_date}
+CONVERSATION HISTORY: {context}
+MEMORIES: {memories}
+
+Available tools:
+- web_search: Current internet information
+- rag: Knowledge base retrieval
+- calculator: Math operations
+
+Your task: Provide structured analysis for this query.
+
+ANALYZE:
+
+1. What is the user asking for? (semantic intent)
+
+2. Is this related to business communication challenges that AI chatbots solve?
+   - Customer support automation needs
+   - 24/7 availability requirements
+   - Multi-platform management difficulties
+   - Scaling communication challenges
+   
+   If yes, set business_opportunity.detected = true and calculate confidence (0-100)
+   Consider: work context, emotional distress, solution-seeking behavior, scale/urgency
+
+3. What tools are needed?
+   - Use rag if: query about Mochan-D OR business opportunity detected
+   - Use web_search if: needs current data, prices, comparisons, weather
+   - Use calculator if: math operations needed
+   - Use no tools if: greetings, casual chat, general knowledge
+
+4. If multiple tools needed, can they run in parallel or must be sequential?
+   - Parallel: Independent tasks
+   - Sequential: One depends on another's output
+
+5. What's the user's emotional state and how should we respond?
+   - Emotion: frustrated/excited/casual/urgent/confused
+   - Personality: empathetic_friend/excited_buddy/helpful_dost/urgent_solver/patient_guide
+   - Length: micro/short/medium/detailed
+   - Language: hinglish/english/professional/casual
+
+Return ONLY valid JSON:
+{{
+  "multi_task_analysis": {{
+    "multi_task_detected": true or false,
+    "sub_tasks": ["task 1", "task 2"]
+  }},
+  "semantic_intent": "what user wants",
+  "expansion_reasoning": "kept simple - straightforward query",
+  "business_opportunity": {{
+    "detected": true or false,
+    "composite_confidence": 0-100,
+    "engagement_level": "direct_consultation|gentle_suggestion|empathetic_probing|pure_empathy",
+    "signal_breakdown": {{
+      "work_context": 0-100,
+      "emotional_distress": 0-100,
+      "solution_seeking": 0-100,
+      "scale_scope": 0-100
+    }},
+    "recommended_approach": "empathy_first|solution_focused|consultation_ready",
+    "pain_points": ["problem 1", "problem 2"],
+    "solution_areas": ["how Mochan-D helps"]
+  }},
+  "tools_to_use": ["tool1", "tool2"],
+  "tool_execution": {{
+    "mode": "sequential|parallel",
+    "order": ["tool1_0", "tool2_0"],
+    "dependency_reason": "reason if sequential"
+  }},
+  "enhanced_queries": {{
+    "rag_0": "query for rag",
+    "web_search_0": "focused search query",
+    "calculator_0": "math expression"
+  }},
+  "tool_reasoning": "why these tools selected",
+  "sentiment": {{
+    "primary_emotion": "frustrated|excited|casual|urgent|confused",
+    "intensity": "low|medium|high"
+  }},
+  "response_strategy": {{
+    "personality": "empathetic_friend|excited_buddy|helpful_dost|urgent_solver|patient_guide",
+    "length": "micro|short|medium|detailed",
+    "language": "hinglish|english|professional|casual",
+    "tone": "friendly|professional|empathetic|excited"
+  }},
+  "key_points_to_address": ["point1", "point2"]
+}}"""
+
+        try:
+            logger.info(f"💨 SIMPLE ANALYSIS (Llama Fast Path)")
+            
+            response = await self.router_llm.generate(
+                messages=[{"role": "user", "content": analysis_prompt}],
+                system_prompt=f"You analyze queries as of {current_date}. Return valid JSON only.",
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            json_str = self._extract_json(response)
+            result = json.loads(json_str)
+            
+            logger.info(f"✅ Simple analysis complete: {result.get('semantic_intent', 'N/A')[:100]}")
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Simple analysis JSON parse error: {e}")
+            return self._get_fallback_analysis(query)
+    
+    def _get_fallback_analysis(self, query: str) -> Dict[str, Any]:
+        """Fallback analysis structure when parsing fails"""
+        return {
+            "multi_task_analysis": {"multi_task_detected": False, "sub_tasks": []},
+            "semantic_intent": query,
+            "expansion_reasoning": "Fallback due to parse error",
+            "business_opportunity": {
+                "detected": False,
+                "composite_confidence": 0,
+                "engagement_level": "pure_empathy",
+                "signal_breakdown": {
+                    "work_context": 0,
+                    "emotional_distress": 0,
+                    "solution_seeking": 0,
+                    "scale_scope": 0
+                },
+                "recommended_approach": "empathy_first",
+                "pain_points": [],
+                "solution_areas": []
+            },
+            "tools_to_use": [],
+            "tool_execution": {"mode": "parallel", "order": [], "dependency_reason": ""},
+            "enhanced_queries": {},
+            "tool_reasoning": "Direct response needed",
+            "sentiment": {"primary_emotion": "casual", "intensity": "medium"},
+            "response_strategy": {
+                "personality": "helpful_dost",
+                "length": "medium",
+                "language": "hinglish",
+                "tone": "friendly"
+            }
+        }
 
     async def _comprehensive_analysis(self, query: str, chat_history: List[Dict] = None, memories:str = "") -> Dict[str, Any]:
         """
@@ -586,37 +839,7 @@ Think through each question naturally, then return ONLY the JSON. No other text.
         except json.JSONDecodeError as e:
             logging.error(f"❌ JSON parse error: {e}")
             logging.error(f"Response snippet: {response[:500] if response else 'No response'}")
-            
-            return {
-                "multi_task_analysis": {"multi_task_detected": False, "sub_tasks": []},
-                "semantic_intent": query,
-                "expansion_reasoning": "Fallback due to parse error",
-                "business_opportunity": {
-                    "detected": False,
-                    "composite_confidence": 0,
-                    "engagement_level": "pure_empathy",
-                    "signal_breakdown": {
-                        "work_context": 0,
-                        "emotional_distress": 0,
-                        "solution_seeking": 0,
-                        "scale_scope": 0
-                    },
-                    "recommended_approach": "empathy_first",
-                    "pain_points": [],
-                    "solution_areas": []
-                },
-                "tools_to_use": [],
-                "tool_execution": {"mode": "parallel", "order": [], "dependency_reason": ""},
-                "enhanced_queries": {},
-                "tool_reasoning": "Direct response needed",
-                "sentiment": {"primary_emotion": "casual", "intensity": "medium"},
-                "response_strategy": {
-                    "personality": "helpful_dost",
-                    "length": "medium",
-                    "language": "hinglish",
-                    "tone": "friendly"
-                }
-            }
+            return self._get_fallback_analysis(query)
  
     async def _execute_tools(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
         """Execute tools with smart parallel/sequential handling based on dependencies"""
