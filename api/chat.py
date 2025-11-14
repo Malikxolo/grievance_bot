@@ -89,11 +89,6 @@ async def lifespan(app: FastAPI):
         model=settings.heart_model,
         max_tokens=1000
     )
-    router_model_config = config.create_llm_config(
-        provider=settings.router_provider,
-        model=settings.router_model,
-        max_tokens=1000
-    )
     web_model_config = config.get_tool_configs(
         web_model=settings.web_model,
         use_premium_search=settings.use_premium_search
@@ -101,10 +96,9 @@ async def lifespan(app: FastAPI):
 
     brain_llm = LLMClient(brain_model_config)
     heart_llm = LLMClient(heart_model_config)
-    router_llm = LLMClient(router_model_config)
     tool_manager = ToolManager(config, brain_llm, web_model_config, settings.use_premium_search)
 
-    optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager, router_llm)
+    optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager)
     
     # Initialize Organization Manager
     mongo_client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
@@ -164,6 +158,7 @@ class ChatMessage(BaseModel):
     chat_history: list[dict] = []
     user_query: str
     mode: Optional[str] = None
+    source: Optional[str] = 'whatsapp'
     
 from .global_config import settings
 
@@ -216,50 +211,12 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         user_query = request.user_query
         chat_history = request.chat_history[-4:] if hasattr(request, 'chat_history') and request.chat_history else []
         mode = request.mode if hasattr(request, 'mode') else None
+        source = request.source if hasattr(request, 'source') else 'whatsapp'
         
         safe_log_user_data(user_id, 'brain_heart_chat', message_count=len(user_query))
         
-        # brain_provider = settings.brain_provider or os.getenv("BRAIN_LLM_PROVIDER")
-        # brain_model = settings.brain_model or os.getenv("BRAIN_LLM_MODEL")
-        # heart_provider = settings.heart_provider or os.getenv("HEART_LLM_PROVIDER")
-        # heart_model = settings.heart_model or os.getenv("HEART_LLM_MODEL")
-        # use_premium_search = settings.use_premium_search or os.getenv("USE_PREMIUM_SEARCH", "false").lower() == "true"
-        # web_model = settings.web_model or os.getenv("WEB_LLM_MODEL", "")
         
-        # config = Config()
-        
-        # brain_model_config = config.create_llm_config(
-        #     provider=brain_provider,
-        #     model=brain_model,
-        #     max_tokens=16000      # Thinking models need lots of space for reasoning chains + JSON
-        # )
-        # heart_model_config = config.create_llm_config(
-        #     provider=heart_provider,
-        #     model=heart_model,
-        #     max_tokens=3000
-        # )
-        # web_model_config = config.get_tool_configs(
-        #     web_model=web_model,
-        #     use_premium_search=use_premium_search
-        # )
-        
-        # tool_manager = ToolManager(
-        #     config,
-        #     brain_model_config,
-        #     web_model,
-        #     use_premium_search
-        # )
-        
-        # brain_llm = LLMClient(brain_model_config)
-        # heart_llm = LLMClient(heart_model_config)
-        
-        # optimizedAgent = OptimizedAgent(
-        #     brain_llm,
-        #     heart_llm,
-        #     tool_manager
-        # )
-        
-        result = await optimizedAgent.process_query(user_query, chat_history, user_id, mode)
+        result = await optimizedAgent.process_query(user_query, chat_history, user_id, mode, source)
         
         if result["success"]:
             safe_log_response(result, level='info')
