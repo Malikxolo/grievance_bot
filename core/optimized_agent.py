@@ -125,8 +125,11 @@ class OptimizedAgent:
                 analysis_start = datetime.now()
                 
                 # ROUTING LAYER: Decide which analysis path to take
-                routing_decision = await self._route_query(query, chat_history, memories)
-                needs_cot = routing_decision.get('needs_cot', True)
+                if source != "whatsapp":
+                    routing_decision = await self._route_query(query, chat_history, memories)
+                    needs_cot = routing_decision.get('needs_cot', True)
+                else:
+                    needs_cot = False  # WhatsApp = simple path
                 
                 # Route to appropriate analysis function
                 if needs_cot:
@@ -416,7 +419,7 @@ Return ONLY valid JSON:
                 messages=[{"role": "user", "content": routing_prompt}],
                 system_prompt="You assess query complexity for routing. Return JSON only.",
                 temperature=0.1,
-                max_tokens=200
+                max_tokens=2000
             )
             
             json_str = self._extract_json(response)
@@ -448,7 +451,7 @@ Return ONLY valid JSON:
         """
         from datetime import datetime
         
-        context = chat_history[-2:] if chat_history else []
+        context = chat_history[-4:] if chat_history else []
         current_date = datetime.now().strftime("%B %d, %Y")
         
         analysis_prompt = f"""You are analyzing queries for Mochan-D - an AI chatbot solution that:
@@ -928,8 +931,9 @@ Think through each question naturally, then return ONLY the JSON. No other text.
             # Simple system prompt for thinking models
             system_prompt = f"""You are analyzing queries as of {current_date}. Think step by step, then output valid JSON only."""
             
-            # messages.append({"role": "system", "content": system_prompt})
-            # messages.append({"role": "user", "content": analysis_prompt})
+            
+            messages = chat_history[-4:] if chat_history else []
+            messages.append({"role": "user", "content": analysis_prompt})
             
             response = await self.brain_llm.generate(
                 messages=[{"role": "user", "content": analysis_prompt}],
@@ -1475,8 +1479,7 @@ Think through each question naturally, then return ONLY the JSON. No other text.
             logger.info(f" CALLING HEART LLM for response generation...")
             logger.info(f" Max tokens: {max_tokens}, Temperature: 0.4")
             
-            # messages = chat_history if chat_history else []
-            messages = []
+            messages = chat_history[-4:] if chat_history else []
             messages.append({"role": "user", "content": response_prompt})
             
             response = await self.heart_llm.generate(
