@@ -498,7 +498,11 @@ Perform ALL of the following analyses in ONE response:
    - Include every specific number, measurement, name, date, and technical detail from the user's query
 
 3. MOCHAN-D PRODUCT OPPORTUNITY ANALYSIS:
-   Does the user's query relate to problems that Mochan-D's AI chatbot solution can solve?
+    ⚠️ FIRST: Ask yourself - "Is the user seeking help for THEIR BUSINESS or for THEMSELVES as a consumer?"
+    Only detect business_opportunity if they are a business owner discussing business challenges.
+
+
+Does the user's query relate to problems that Mochan-D's AI chatbot solution can solve?
 
 
    MOCHAN-D-SPECIFIC TRIGGERS (check for these pain points):
