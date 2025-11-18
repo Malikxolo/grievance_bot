@@ -19,7 +19,6 @@ from os import getenv
 from mem0 import AsyncMemory
 import time
 from functools import partial
-from mem0.configs.base import MemoryConfig
 from .config import AddBackgroundTask, memory_config
 from .redis_manager import RedisCacheManager
 
