@@ -1567,6 +1567,11 @@ Think through each question naturally, then return ONLY the JSON. No other text.
                     formatted.append(f"{tool.upper()} ({provider_name}):\n{result['llm_response']}\n")
                     continue
                 
+                # Handle calculator results - just show the number
+                if tool.startswith('calculator') and 'result' in result:
+                    formatted.append(f"{result['result']}")
+                    continue
+                
                 # Handle RAG-style result
                 if "success" in result and result["success"]:
                     logger.info(f" Formatting result for tool: {result}")
