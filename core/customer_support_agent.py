@@ -83,23 +83,33 @@ class CustomerSupportAgent:
             logger.info(f"📊 ANALYSIS RESULTS:")
             logger.info(f"   Intent: {analysis.get('intent', 'Unknown')}")
             logger.info(f"   Sentiment: {analysis.get('sentiment', {}).get('emotion', 'neutral')}")
+            logger.info(f"   Needs More Info: {analysis.get('needs_more_info', False)}")
+            logger.info(f"   Missing Info: {analysis.get('missing_info', 'none')}")
             logger.info(f"   Tools Selected: {analysis.get('tools_to_use', [])}")
+            logger.info(f"   Tool Sequence: {analysis.get('tool_sequence', 'parallel')}")
+            logger.info(f"   Needs De-escalation: {analysis.get('needs_de_escalation', False)}")
             
-            # STEP 2: Execute tools if needed
+            # STEP 2: Skip tool execution if we need more info from customer
             tools_to_use = analysis.get('tools_to_use', [])
-            tool_start = datetime.now()
-            tool_results = await self._execute_tools(tools_to_use, query, analysis, user_id)
-            tool_time = (datetime.now() - tool_start).total_seconds()
+            if analysis.get('needs_more_info', False):
+                logger.info("❓ Need more info from customer - skipping tools")
+                tool_results = {}
+                tool_time = 0.0
+            else:
+                # Execute tools
+                tool_start = datetime.now()
+                tool_results = await self._execute_tools(tools_to_use, query, analysis, user_id)
+                tool_time = (datetime.now() - tool_start).total_seconds()
             
             # STEP 3: Generate response
             response_start = datetime.now()
-            if not cached_analysis:
-                memory_results = await self.memory.search(query, user_id=user_id, limit=5)
-                memories = "\n".join([
-                    f"- {item['memory']}" 
-                    for item in memory_results.get("results", []) 
-                    if item.get("memory")
-                ]) or "No previous context."
+            # Always get memories for response generation
+            memory_results = await self.memory.search(query, user_id=user_id, limit=5)
+            memories = "\n".join([
+                f"- {item['memory']}" 
+                for item in memory_results.get("results", []) 
+                if item.get("memory")
+            ]) or "No previous context."
             
             final_response = await self._generate_response(
                 query, analysis, tool_results, chat_history, memories
@@ -161,65 +171,75 @@ class CustomerSupportAgent:
         analysis_prompt = f"""You are analyzing a customer support query as of {current_date}.
 
         Available tools:
-        - live_information: Search for current information (regarding order status, product availability, etc.)
-        - knowledge_base: Search internal documentation and FAQs
-        - raise_ticket: Raise a support ticket in the system
-        - assign_agent: Assign a human agent for follow-up
+        - live_information: Get real-time order status, tracking, customer data
+        - knowledge_base: Search FAQs, policies, product guides, documentation
+        - order_action: Execute refund, cancel, replacement, return label, discount
+        - raise_ticket: Create support ticket for non-urgent issues needing investigation
+        - assign_agent: Escalate to human agent for urgent/complex issues
+        - verification: Check fraud risk (use BEFORE order_action for refunds/cancels)
 
         USER QUERY: {query}
         CONVERSATION HISTORY: {context}
         PREVIOUS CONTEXT: {memories}
 
-        Analyze this query and provide:
+        Think about what the customer wants and how to help them:
+
+        Understand their intent first. Is it clear what they need, or are they just saying "help"?
+        
+        For sensitive actions involving money or personal data (refunds, cancellations, exchanges):
+        - Check for fraud risk first (verification tool)
+        - Then connect to a human who can safely handle it (assign_agent tool)
+        - Use sequential execution so verification happens before escalation
+        
+        For simple information requests (order tracking, policies, product questions):
+        - Retrieve the information directly (live_information or knowledge_base tool)
+        - You can resolve these without human help
+        
+        If someone is very upset or the situation is complex:
+        - Connect them to a human immediately (assign_agent tool)
+        
+        If you genuinely don't understand what they want:
+        - Ask them to clarify (needs_more_info=true, no tools yet)
+        
+        If you know what they want but are missing details (like an order number):
+        - Start the process anyway, the tools will request what they need
+
+        Consider the emotional context:
+        
+        If the customer is very frustrated or angry, acknowledge that first (needs_de_escalation=true).
+        
+        Only ask for clarification when you truly don't understand their goal, not when you just need a detail like an order number.
+        
+        When multiple tools are needed, think about dependencies: should one run before the other, or can they run together?
+
+        Analyze and provide:
 
         1. CUSTOMER INTENT: What does the customer need?
-        - Information request
-        - Problem resolution
-        - Product inquiry
-        - Account assistance
-        - Complaint/feedback
-
-        2. SENTIMENT ANALYSIS:
-        - Emotion: frustrated, satisfied, confused, urgent, neutral
-        - Intensity: low, medium, high
-        - Urgency level: low, medium, high
-
-        3. TOOL SELECTION:
-        Select tools needed to help the customer:
-            - live_information: Use FIRST to check user's past order records. Only ask for order ID if information is not found.
-            - knowledge_base: Search internal documentation and FAQs
-            - raise_ticket: Raise a support ticket in the system
-            - assign_agent: ONLY call when BOTH conditions are met:
-                a) The damaged good/service is perishable
-                b) The user is asking for refund OR replacement
-        
-        Use NO tools for: greetings, simple acknowledgments, general chitchat
-
-        IMPORTANT: For physically damaged goods, request a picture as proof before proceeding.
-
-        4. QUERY ENHANCEMENT:
-        For each selected tool, create a focused query
-
-        5. RESPONSE STRATEGY:
-        - Tone: empathetic, professional, friendly, solution-focused
-        - Length: brief, moderate, detailed
-        - Priority: address emotion first, then solution
+        2. SENTIMENT: Emotion, intensity, urgency
+        3. CONVERSATION STATE: Do you need more information before taking action?
+        4. TOOL SELECTION: Which tools (if any) based on principles above
+        5. RESPONSE STRATEGY: Tone, length, priority
 
         Return ONLY valid JSON:
         {{
         "intent": "what customer needs",
-        "is_follow_up": true or false,
-        "requires_proof_picture": true or false,
         "sentiment": {{
             "emotion": "frustrated|satisfied|confused|urgent|neutral",
             "intensity": "low|medium|high",
             "urgency": "low|medium|high"
         }},
-        "requires_proof_picture": true or false,
+        "needs_more_info": true or false,
+        "missing_info": "order_id|photo|details|confirmation|none",
+        "needs_de_escalation": true or false,
+        "de_escalation_message": "brief empathy statement if needed",
         "tools_to_use": ["tool1", "tool2"],
+        "tool_sequence": "parallel|sequential",
+        "reason_for_tools": "explain why these tools match the workflow stage",
         "enhanced_queries": {{
             "live_information_0": "query for live information",
             "knowledge_base_0": "query for knowledge base",
+            "order_action_0": "action type and details",
+            "verification_0": "verification check details",
             "raise_ticket_0": "ticket details",
             "assign_agent_0": "reason for agent assignment"
         }},
@@ -228,6 +248,7 @@ class CustomerSupportAgent:
             "length": "brief|moderate|detailed",
             "priority": "emotion_first|solution_first|information_first"
         }},
+        "workflow_stage": "ComplianceVerification|SecureHandlingTeam|AIAutoResponse|AIAssistedRouting|TicketCreation",
         "key_points": ["point1", "point2"]
         }}"""
 
@@ -253,13 +274,17 @@ class CustomerSupportAgent:
         """Fallback analysis when parsing fails"""
         return {
             "intent": query,
-            "is_follow_up": False,
             "sentiment": {
                 "emotion": "neutral",
                 "intensity": "medium",
                 "urgency": "medium"
             },
+            "needs_more_info": False,
+            "missing_info": "none",
+            "needs_de_escalation": False,
+            "de_escalation_message": "",
             "tools_to_use": [],
+            "tool_sequence": "parallel",
             "enhanced_queries": {},
             "response_strategy": {
                 "tone": "professional",
@@ -270,14 +295,44 @@ class CustomerSupportAgent:
         }
 
     async def _execute_tools(self, tools: List[str], query: str, analysis: Dict, user_id: str = None) -> Dict[str, Any]:
-        """Execute tools in parallel"""
+        """Execute tools in parallel or sequentially based on analysis"""
         if not tools:
             return {}
         
         results = {}
         enhanced_queries = analysis.get('enhanced_queries', {})
+        tool_sequence = analysis.get('tool_sequence', 'parallel')
         
-        # Execute all tools in parallel
+        # Check if we need sequential execution (verification → order_action)
+        if tool_sequence == 'sequential' and 'verification' in tools:
+            # Run verification first
+            logger.info("🔐 Running verification check first...")
+            result = await self.tool_manager.execute_tool('verification', query=query, user_id=user_id)
+            results['verification_0'] = result
+            
+            # Check risk level
+            risk = result.get('fraud_check', {}).get('risk_level', 'low')
+            if risk == 'high':
+                logger.warning("⚠️ High fraud risk detected - skipping order_action")
+                # Remove order_action from tools
+                tools = [t for t in tools if t != 'order_action']
+                # Add assign_agent instead
+                if 'assign_agent' not in tools:
+                    tools.append('assign_agent')
+                    logger.info("🚨 Adding assign_agent for human review")
+            
+            # Now run remaining tools in parallel
+            remaining_tools = [t for t in tools if t != 'verification']
+            if remaining_tools:
+                await self._execute_parallel(remaining_tools, enhanced_queries, query, user_id, results)
+        else:
+            # Parallel execution (existing logic)
+            await self._execute_parallel(tools, enhanced_queries, query, user_id, results)
+        
+        return results
+    
+    async def _execute_parallel(self, tools: List[str], enhanced_queries: Dict, query: str, user_id: str, results: Dict):
+        """Helper for parallel tool execution"""
         tasks = []
         tool_counter = {}
         
@@ -303,8 +358,6 @@ class CustomerSupportAgent:
             except Exception as e:
                 logger.error(f"❌ {tool_name} failed: {e}")
                 results[tool_name] = {"error": str(e)}
-        
-        return results
     
     async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, 
                                  chat_history: List[Dict], memories: str = "") -> str:
@@ -327,6 +380,10 @@ class CustomerSupportAgent:
         - Emotion: {sentiment.get('emotion', 'neutral')}
         - Urgency: {sentiment.get('urgency', 'medium')}
 
+        DE-ESCALATION:
+        - Needs De-escalation: {analysis.get('needs_de_escalation', False)}
+        - De-escalation Message: {analysis.get('de_escalation_message', '')}
+
         AVAILABLE INFORMATION:
         {tool_data}
 
@@ -341,13 +398,14 @@ class CustomerSupportAgent:
         - Use clear, friendly language
 
         2. STRUCTURE:
+        - If needs_de_escalation is true: START with the de-escalation message to acknowledge their frustration
         - Start with acknowledgment (1 sentence max)
         - DO NOT start the sentence with what the customer said
         - Provide clear solution/information (direct and focused)
         - Offer additional help only if necessary (1 sentence max)
 
         3. SENTIMENT HANDLING:
-        - frustrated/urgent: Skip pleasantries, go straight to the solution
+        - frustrated/urgent: Skip pleasantries, go straight to the solution (AFTER de-escalation if needed)
         - confused: Give step-by-step guidance, no extra explanations
         - satisfied: Brief, warm acknowledgment
         - neutral: Direct and informative
@@ -368,23 +426,34 @@ class CustomerSupportAgent:
 
         6. SPECIAL HANDLING BASED ON ANALYSIS:
         
-        PROOF OF PICTURE REQUIRED: {analysis.get('requires_proof_picture', False)}
-        - If true and no picture provided yet: Ask the customer to provide a picture of the damaged item before proceeding
-        - If true and picture already provided: Acknowledge receipt and proceed with solution
+        CONVERSATION STATE:
+        - Needs More Info: {analysis.get('needs_more_info', False)}
+        - If true: Ask what they need help with (intent is unclear)
         
-        ORDER INFORMATION:
-        - If live_information was used: The tool_data contains order history - use this information directly
-        - If order info is missing from tool_data: Politely ask for the order ID to look up details
-        - Never ask for order ID if it's already in the tool_data from live_information
+        TOOL RESULTS - CHECK WHAT ACTUALLY HAPPENED:
         
-        AGENT ASSIGNMENT:
-        - If assign_agent tool was triggered: Inform customer that a specialist agent will follow up
-        - Only mention agent assignment if it appears in the tools_to_use list
-        - For perishable damaged goods with refund/replacement requests: Confirm agent assignment for priority handling
-
-        TICKET RAISED:
-        - If raise_ticket tool was used: Provide the ticket reference if available in tool_data
-        - Assure customer their issue is being tracked
+        Look at the tool results data carefully. Did tools succeed or fail?
+        
+        If a tool has an "error" field:
+        - The tool failed to execute
+        - Apologize and offer to try another way or connect to human
+        
+        If tool says it needs more information (missing field, error message about missing data):
+        - Ask for that specific information naturally
+        
+        If verification and assign_agent both succeeded:
+        - Tell customer "I've verified your request and connected you with a specialist who can help"
+        
+        If assign_agent succeeded alone:
+        - Tell customer "Connecting you with an agent now"
+        
+        If live_information or knowledge_base returned data:
+        - Use that data to answer their question directly
+        
+        If raise_ticket succeeded:
+        - Give them the ticket reference
+        
+        Base your response on ACTUAL tool results, not what was supposed to happen.
 
         CUSTOMER QUERY: {query}
 
@@ -400,6 +469,16 @@ class CustomerSupportAgent:
             messages = chat_history[-4:] if chat_history else []
             messages.append({"role": "user", "content": response_prompt})
             
+            logger.info("="*80)
+            logger.info("💬 RESPONSE GENERATION PROMPT:")
+            logger.info("="*80)
+            logger.info(f"QUERY: {query}")
+            logger.info(f"INTENT: {intent}")
+            logger.info(f"SENTIMENT: {sentiment}")
+            logger.info(f"TOOL RESULTS:\n{tool_data}")
+            logger.info(f"MAX TOKENS: {max_tokens}")
+            logger.info("="*80)
+            
             response = await self.heart_llm.generate(
                 messages,
                 temperature=0.4,
@@ -408,7 +487,13 @@ class CustomerSupportAgent:
             )
             
             response = self._clean_response(response)
-            logger.info(f"✅ Response generated: {len(response)} chars")
+            
+            logger.info("="*80)
+            logger.info("✅ FULL RESPONSE GENERATED:")
+            logger.info("="*80)
+            logger.info(response)
+            logger.info("="*80)
+            logger.info(f"Response length: {len(response)} chars")
             
             return response
             

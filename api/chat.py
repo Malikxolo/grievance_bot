@@ -105,11 +105,11 @@ async def lifespan(app: FastAPI):
     brain_llm = LLMClient(brain_model_config)
     heart_llm = LLMClient(heart_model_config)
     routing_llm = LLMClient(routing_config)
-    # tool_manager = CSToolManager({})
-    tool_manager = ToolManager(config, brain_llm, web_model_config, settings.use_premium_search)
+    tool_manager = CSToolManager({})
+    # tool_manager = ToolManager(config, brain_llm, web_model_config, settings.use_premium_search)
 
-    optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager, routing_llm)
-    # optimizedAgent = CustomerSupportAgent(brain_llm, heart_llm, tool_manager)
+    # optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager, routing_llm)
+    optimizedAgent = CustomerSupportAgent(brain_llm, heart_llm, tool_manager)
     
     # Initialize Organization Manager
     mongo_client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))

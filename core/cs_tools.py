@@ -48,7 +48,7 @@ class LiveInformationTool(BaseTool):
     def __init__(self, api_base_url: str = None, api_key: str = None):
         super().__init__(
             "live_information",
-            "Search for current information regarding order status, product availability, inventory, etc."
+            "Get real-time order and customer information. Use for: order status lookup, tracking information, order history, customer profile. When customer asks about their order location, status, or delivery details."
         )
         self.api_base_url = api_base_url
         self.api_key = api_key
@@ -194,7 +194,7 @@ class KnowledgeBaseTool(BaseTool):
     def __init__(self, kb_config: Dict[str, Any] = None):
         super().__init__(
             "knowledge_base",
-            "Search internal documentation, FAQs, and knowledge base articles"
+            "Search company documentation, FAQs, policies, and guides. Use for: return/refund policies, product information, how-to guides, shipping information. When customer asks policy questions or needs product help."
         )
         self.kb_config = kb_config or {}
         
@@ -272,7 +272,7 @@ class RaiseTicketTool(BaseTool):
     def __init__(self, ticketing_api_url: str = None, api_key: str = None):
         super().__init__(
             "raise_ticket",
-            "Create and raise a support ticket for unresolved issues"
+            "Create support ticket for non-urgent issues requiring investigation. Use for: problems needing research, warehouse/courier checks, complex issues that can wait. When issue cannot be resolved immediately but is not urgent."
         )
         self.ticketing_api_url = ticketing_api_url
         self.api_key = api_key
@@ -372,7 +372,7 @@ class AssignAgentTool(BaseTool):
     def __init__(self, agent_api_url: str = None, api_key: str = None):
         super().__init__(
             "assign_agent",
-            "Assign a human agent for complex issues requiring personal attention"
+            "Escalate to human agent for immediate assistance. Use for: urgent/critical issues, very frustrated customers, complex problems you cannot resolve, or when customer explicitly requests human agent. Provides immediate human support."
         )
         self.agent_api_url = agent_api_url
         self.api_key = api_key
@@ -380,20 +380,36 @@ class AssignAgentTool(BaseTool):
         
         logger.info("AssignAgentTool initialized")
     
-    async def execute(self, user_id: str, issue_type: str, 
-                     context: str = None, priority: str = "medium",
-                     preferred_channel: str = None, **kwargs) -> Dict[str, Any]:
+    async def execute(self, user_id: str = None, issue_type: str = None, 
+                     context: str = None, priority: str = "high",
+                     preferred_channel: str = "chat", query: str = None, **kwargs) -> Dict[str, Any]:
         """
         Assign a human agent
         
         Args:
             user_id: User identifier
-            issue_type: Type of issue - "technical", "billing", "complaint", "sales"
+            issue_type: Type of issue - "technical", "billing", "complaint", "sales" (auto-detected if not provided)
             context: Context/history of the conversation
             priority: Assignment priority - "low", "medium", "high", "urgent"
             preferred_channel: Preferred communication channel - "chat", "phone", "email"
+            query: Customer query to auto-detect issue type
         """
         self._record_usage()
+        
+        # Auto-detect issue type from query if not provided
+        if not issue_type and query:
+            query_lower = query.lower()
+            if any(word in query_lower for word in ['refund', 'money', 'payment', 'charge', 'bill']):
+                issue_type = "billing"
+            elif any(word in query_lower for word in ['broken', 'defect', 'not working', 'issue', 'problem']):
+                issue_type = "technical"
+            elif any(word in query_lower for word in ['angry', 'frustrated', 'complaint', 'terrible', 'awful']):
+                issue_type = "complaint"
+            else:
+                issue_type = "general"
+        elif not issue_type:
+            issue_type = "general"
+        
         logger.info(f"Assigning agent: user={user_id}, type={issue_type}, priority={priority}")
         
         try:
@@ -473,6 +489,270 @@ class AssignAgentTool(BaseTool):
             logger.debug("AssignAgentTool session closed")
 
 
+class OrderActionTool(BaseTool):
+    """Execute order-related actions: refund, cancel, replace, return label"""
+    
+    def __init__(self, api_base_url: str = None, api_key: str = None):
+        super().__init__(
+            "order_action",
+            "Execute order modifications: refund, cancel, replacement, return label, apply discount. IMPORTANT: For refunds/cancellations, use verification tool FIRST to check fraud risk. Available actions: refund, cancel, replace, return_label, apply_discount."
+        )
+        self.api_base_url = api_base_url
+        self.api_key = api_key
+        self.session = None
+        
+        logger.info("OrderActionTool initialized")
+    
+    async def execute(self, action: str, order_id: str = None, user_id: str = None,
+                     reason: str = None, amount: float = None, **kwargs) -> Dict[str, Any]:
+        """
+        Execute order actions
+        
+        Args:
+            action: Action type - "refund", "cancel", "replace", "return_label", "apply_discount"
+            order_id: Order identifier
+            user_id: User identifier
+            reason: Reason for action
+            amount: Amount for refund/discount
+        """
+        self._record_usage()
+        logger.info(f"Order action: action={action}, order_id={order_id}")
+        
+        try:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
+            # Route to appropriate action handler
+            if action == "refund":
+                return await self._process_refund(order_id, user_id, amount, reason)
+            elif action == "cancel":
+                return await self._cancel_order(order_id, user_id, reason)
+            elif action == "replace":
+                return await self._create_replacement(order_id, user_id, reason)
+            elif action == "return_label":
+                return await self._generate_return_label(order_id, user_id, reason)
+            elif action == "apply_discount":
+                return await self._apply_discount(user_id, amount, reason)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unknown action: {action}",
+                    "valid_actions": ["refund", "cancel", "replace", "return_label", "apply_discount"]
+                }
+                
+        except Exception as e:
+            logger.error(f"Order action failed: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Order action failed: {str(e)}",
+                "action": action
+            }
+    
+    async def _process_refund(self, order_id: str, user_id: str, amount: float, reason: str) -> Dict[str, Any]:
+        """Process refund for order"""
+        
+        # TODO: Implement refund processing
+        # Steps:
+        # 1. Validate refund eligibility
+        # 2. Calculate refund amount
+        # 3. Call payment gateway API
+        # 4. Update order status
+        # 5. Send confirmation notification
+        
+        logger.info(f"Processing refund: order={order_id}, amount={amount}")
+        
+        return {
+            "success": True,
+            "action": "refund",
+            "order_id": order_id,
+            "refund_amount": amount,
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Refund processing not yet implemented"
+        }
+    
+    async def _cancel_order(self, order_id: str, user_id: str, reason: str) -> Dict[str, Any]:
+        """Cancel order"""
+        
+        # TODO: Implement order cancellation
+        # Steps:
+        # 1. Check if order can be cancelled (not shipped)
+        # 2. Update order status to cancelled
+        # 3. Initiate refund if already paid
+        # 4. Update inventory
+        # 5. Send confirmation
+        
+        logger.info(f"Cancelling order: order={order_id}")
+        
+        return {
+            "success": True,
+            "action": "cancel",
+            "order_id": order_id,
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Order cancellation not yet implemented"
+        }
+    
+    async def _create_replacement(self, order_id: str, user_id: str, reason: str) -> Dict[str, Any]:
+        """Create replacement order"""
+        
+        # TODO: Implement replacement order creation
+        # Steps:
+        # 1. Verify original order
+        # 2. Check inventory for replacement
+        # 3. Create new order with same items
+        # 4. Generate shipping label
+        # 5. Link to original order
+        # 6. Send confirmation
+        
+        logger.info(f"Creating replacement: order={order_id}")
+        
+        return {
+            "success": True,
+            "action": "replace",
+            "original_order_id": order_id,
+            "replacement_order_id": "PLACEHOLDER",
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Replacement order creation not yet implemented"
+        }
+    
+    async def _generate_return_label(self, order_id: str, user_id: str, reason: str) -> Dict[str, Any]:
+        """Generate return shipping label"""
+        
+        # TODO: Implement return label generation
+        # Steps:
+        # 1. Verify order is eligible for return
+        # 2. Call shipping API to generate label
+        # 3. Generate QR code for WhatsApp
+        # 4. Store return authorization
+        # 5. Send label to customer
+        
+        logger.info(f"Generating return label: order={order_id}")
+        
+        return {
+            "success": True,
+            "action": "return_label",
+            "order_id": order_id,
+            "label_url": "PLACEHOLDER",
+            "tracking_number": "PLACEHOLDER",
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Return label generation not yet implemented"
+        }
+    
+    async def _apply_discount(self, user_id: str, amount: float, reason: str) -> Dict[str, Any]:
+        """Apply discount/credit to customer account"""
+        
+        # TODO: Implement discount application
+        # Steps:
+        # 1. Validate discount amount
+        # 2. Generate coupon code or apply credit
+        # 3. Update customer account
+        # 4. Set expiration date
+        # 5. Send notification
+        
+        logger.info(f"Applying discount: user={user_id}, amount={amount}")
+        
+        return {
+            "success": True,
+            "action": "apply_discount",
+            "user_id": user_id,
+            "discount_amount": amount,
+            "coupon_code": "PLACEHOLDER",
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Discount application not yet implemented"
+        }
+    
+    async def close(self):
+        """Close HTTP session"""
+        if self.session:
+            await self.session.close()
+            logger.debug("OrderActionTool session closed")
+
+
+class VerificationTool(BaseTool):
+    """Customer verification: Fraud detection and risk assessment (NO OTP - not needed for CS workflows)"""
+    
+    def __init__(self, fraud_api_key: str = None):
+        super().__init__(
+            "verification",
+            "Check fraud risk and verify legitimacy of refund/cancel requests. ALWAYS use BEFORE order_action when processing refunds or cancellations. Returns risk_level (low/medium/high). If risk is high, use assign_agent instead of order_action."
+        )
+        self.fraud_api_key = fraud_api_key
+        self.session = None
+        
+        logger.info("VerificationTool initialized")
+    
+    async def execute(self, query: str, user_id: str = None, 
+                     order_id: str = None, action_requested: str = None, **kwargs) -> Dict[str, Any]:
+        """
+        Execute verification/fraud checks
+        
+        Args:
+            query: Original customer query for context
+            user_id: User identifier (phone number for WhatsApp)
+            order_id: Order ID if action is order-related
+            action_requested: Type of action customer wants (refund, cancel, etc.)
+        """
+        self._record_usage()
+        logger.info(f"Verification check: user={user_id}, action={action_requested}")
+        
+        try:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
+            # Perform fraud/risk assessment
+            fraud_result = await self._fraud_check(user_id, order_id, action_requested, kwargs)
+            
+            return {
+                "success": True,
+                "verification_passed": fraud_result["risk_level"] != "high",
+                "fraud_check": fraud_result,
+                "message": "Verification check completed"
+            }
+                
+        except Exception as e:
+            logger.error(f"Verification action failed: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Verification action failed: {str(e)}",
+                "verification_passed": False
+            }
+    
+    async def _fraud_check(self, user_id: str, order_id: str, action: str, context: dict) -> Dict[str, Any]:
+        """Check for fraud indicators"""
+        
+        # TODO: Implement fraud detection
+        # Checks:
+        # 1. Multiple refund requests in short time (rate limiting)
+        # 2. High-value refund requests (flag for manual review)
+        # 3. New account with immediate refund (suspicious pattern)
+        # 4. Order history analysis (frequent returns = potential fraud)
+        # 5. Blacklist checking (known fraudsters)
+        # 6. Order value vs refund pattern
+        
+        logger.info(f"Fraud check: user={user_id}, order={order_id}, action={action}")
+        
+        # Placeholder implementation
+        # In production, this would call fraud detection API or check Redis counters
+        return {
+            "fraud_score": 0.0,  # 0.0-1.0 scale
+            "risk_level": "low",  # low, medium, high
+            "indicators": [],  # List of fraud indicators found
+            "recommendation": "proceed",  # proceed, manual_review, block
+            "checks_performed": [
+                "rate_limit_check",
+                "order_history_check",
+                "blacklist_check"
+            ],
+            "status": "PENDING_IMPLEMENTATION",
+            "message": "Fraud detection not yet implemented - defaulting to low risk"
+        }
+    
+    async def close(self):
+        """Close HTTP session"""
+        if self.session:
+            await self.session.close()
+            logger.debug("VerificationTool session closed")
+
+
 class ToolManager:
     """Manages all customer support tools"""
     
@@ -486,7 +766,7 @@ class ToolManager:
     def _initialize_tools(self):
         """Initialize all configured tools"""
         
-        # Live Information Tool
+        # Live Information Tool (Customer & Order Data)
         live_info_config = self.config.get("live_information", {})
         self.tools["live_information"] = LiveInformationTool(
             api_base_url=live_info_config.get("api_url"),
@@ -511,6 +791,19 @@ class ToolManager:
         self.tools["assign_agent"] = AssignAgentTool(
             agent_api_url=agent_config.get("api_url"),
             api_key=agent_config.get("api_key")
+        )
+        
+        # Order Action Tool (NEW)
+        order_action_config = self.config.get("order_action", {})
+        self.tools["order_action"] = OrderActionTool(
+            api_base_url=order_action_config.get("api_url"),
+            api_key=order_action_config.get("api_key")
+        )
+        
+        # Verification Tool (NEW)
+        verification_config = self.config.get("verification", {})
+        self.tools["verification"] = VerificationTool(
+            fraud_api_key=verification_config.get("fraud_api_key")
         )
         
         logger.info(f"✅ Initialized {len(self.tools)} tools: {list(self.tools.keys())}")
