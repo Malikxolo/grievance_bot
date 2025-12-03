@@ -245,6 +245,354 @@ class MCPTransport(ABC):
         pass
 
 
+class StdioTransport(MCPTransport):
+    """
+    Stdio transport for local MCP servers.
+    
+    Spawns an MCP server as a subprocess and communicates via stdin/stdout
+    using JSON-RPC 2.0 protocol. This is the standard transport for local
+    MCP servers like MongoDB Atlas MCP Server.
+    
+    Features:
+        - Subprocess management (spawn, monitor, terminate)
+        - JSON-RPC over stdin/stdout
+        - Automatic process restart on failure
+        - Environment variable injection
+        - Request/response correlation via ID
+    
+    Usage:
+        transport = StdioTransport(
+            command="npx",
+            args=["-y", "@mongodb-js/mongodb-mcp-server"],
+            env={"MDB_MCP_CONNECTION_STRING": "mongodb+srv://..."}
+        )
+        await transport.connect()
+        response = await transport.send_request(request)
+        await transport.disconnect()
+    """
+    
+    def __init__(
+        self,
+        command: str,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+        startup_timeout: int = 60,
+        cwd: Optional[str] = None
+    ):
+        """
+        Initialize Stdio transport.
+        
+        Args:
+            command: Command to run (e.g., "npx", "node", "python")
+            args: Command arguments (e.g., ["-y", "@mongodb-js/mongodb-mcp-server"])
+            env: Environment variables to pass to subprocess
+            timeout: Request timeout in seconds
+            startup_timeout: Timeout for process startup in seconds
+            cwd: Working directory for subprocess
+        """
+        self.command = command
+        self.args = args or []
+        self.env = env or {}
+        self.timeout = timeout
+        self.startup_timeout = startup_timeout
+        self.cwd = cwd
+        
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._connected = False
+        self._request_count = 0
+        self._error_count = 0
+        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._reader_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+        
+        # Build full command for logging
+        full_cmd = f"{command} {' '.join(args)}"
+        logger.info(f"✅ StdioTransport initialized")
+        logger.info(f"   Command: {full_cmd}")
+        logger.info(f"   Timeout: {timeout}s, Startup timeout: {startup_timeout}s")
+    
+    async def connect(self) -> bool:
+        """
+        Start subprocess and establish stdio communication.
+        
+        Returns:
+            True if connection successful
+        """
+        if self._process is not None and self._process.returncode is None:
+            logger.debug("Process already running, reusing")
+            return True
+        
+        try:
+            # Prepare environment (merge with current env)
+            import os
+            import platform
+            process_env = os.environ.copy()
+            process_env.update(self.env)
+            
+            # On Windows, we need to use .cmd extension for npx/npm
+            command = self.command
+            if platform.system() == "Windows":
+                if command in ["npx", "npm", "node"]:
+                    # Try to find the .cmd version
+                    import shutil
+                    cmd_version = f"{command}.cmd"
+                    if shutil.which(cmd_version):
+                        command = cmd_version
+                    elif not shutil.which(command):
+                        # If plain command doesn't work, try full path
+                        nodejs_path = os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "nodejs")
+                        cmd_path = os.path.join(nodejs_path, cmd_version)
+                        if os.path.exists(cmd_path):
+                            command = cmd_path
+            
+            # Build command list
+            cmd = [command] + self.args
+            
+            logger.info(f"🚀 Starting MCP server subprocess...")
+            logger.debug(f"   Command: {' '.join(cmd)}")
+            
+            # Start subprocess
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=process_env,
+                cwd=self.cwd
+            )
+            
+            logger.info(f"   Process started with PID: {self._process.pid}")
+            
+            # Start stderr reader for debugging
+            asyncio.create_task(self._read_stderr())
+            
+            # Start stdout reader task
+            self._reader_task = asyncio.create_task(self._read_responses())
+            
+            # Send initialize request to confirm server is ready
+            init_request = MCPRequest(
+                method=MCPMethod.INITIALIZE,
+                params={
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "clientInfo": {
+                        "name": "CS-Agent-MCP-Client",
+                        "version": "1.0.0"
+                    }
+                }
+            )
+            
+            # Wait for initialization with timeout
+            try:
+                response = await asyncio.wait_for(
+                    self.send_request(init_request),
+                    timeout=self.startup_timeout
+                )
+                
+                if response.is_success:
+                    self._connected = True
+                    logger.info(f"✅ MCP server initialized successfully")
+                    if response.result:
+                        server_info = response.result.get("serverInfo", {})
+                        logger.info(f"   Server: {server_info.get('name', 'Unknown')} v{server_info.get('version', 'Unknown')}")
+                    return True
+                else:
+                    logger.error(f"❌ MCP server initialization failed: {response.error_message}")
+                    await self.disconnect()
+                    return False
+                    
+            except asyncio.TimeoutError:
+                logger.error(f"❌ MCP server startup timeout ({self.startup_timeout}s)")
+                await self.disconnect()
+                return False
+                
+        except FileNotFoundError:
+            logger.error(f"❌ Command not found: {self.command}")
+            logger.error("   Make sure the command is installed and in PATH")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to start MCP server: {e}")
+            await self.disconnect()
+            return False
+    
+    async def _read_stderr(self):
+        """Read stderr from subprocess for debugging"""
+        if not self._process or not self._process.stderr:
+            return
+            
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                stderr_text = line.decode().strip()
+                if stderr_text:
+                    logger.debug(f"[MCP stderr] {stderr_text}")
+        except Exception as e:
+            logger.debug(f"Stderr reader ended: {e}")
+    
+    async def _read_responses(self):
+        """Read responses from subprocess stdout"""
+        if not self._process or not self._process.stdout:
+            return
+            
+        try:
+            while True:
+                line = await self._process.stdout.readline()
+                if not line:
+                    logger.warning("MCP server stdout closed")
+                    break
+                    
+                try:
+                    response_text = line.decode().strip()
+                    if not response_text:
+                        continue
+                        
+                    logger.debug(f"[MCP response] {response_text[:200]}...")
+                    
+                    data = json.loads(response_text)
+                    request_id = data.get("id")
+                    
+                    if request_id and request_id in self._pending_requests:
+                        future = self._pending_requests.pop(request_id)
+                        if not future.done():
+                            future.set_result(data)
+                    else:
+                        # Handle notifications (no id) or orphan responses
+                        logger.debug(f"Received notification or orphan response: {data}")
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse MCP response: {e}")
+                    
+        except asyncio.CancelledError:
+            logger.debug("Response reader cancelled")
+        except Exception as e:
+            logger.error(f"Response reader error: {e}")
+            self._connected = False
+    
+    async def disconnect(self) -> None:
+        """Terminate subprocess and cleanup"""
+        self._connected = False
+        
+        # Cancel reader task
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
+        
+        # Cancel pending requests
+        for future in self._pending_requests.values():
+            if not future.done():
+                future.cancel()
+        self._pending_requests.clear()
+        
+        # Terminate process
+        if self._process:
+            try:
+                self._process.terminate()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Process did not terminate gracefully, killing...")
+                    self._process.kill()
+                    await self._process.wait()
+                logger.info(f"✅ MCP server process terminated")
+            except Exception as e:
+                logger.warning(f"Error terminating process: {e}")
+            self._process = None
+    
+    async def send_request(self, request: MCPRequest) -> MCPResponse:
+        """
+        Send request to MCP server via stdin and wait for response.
+        
+        Args:
+            request: MCP request to send
+            
+        Returns:
+            MCP response from server
+        """
+        if not self._process or self._process.returncode is not None:
+            return MCPResponse.from_error(
+                request.request_id,
+                JSONRPCErrorCode.INTERNAL_ERROR,
+                "MCP server process not running"
+            )
+        
+        start_time = time.time()
+        
+        async with self._lock:
+            try:
+                # Create future for response
+                future: asyncio.Future = asyncio.Future()
+                self._pending_requests[request.request_id] = future
+                
+                # Send request via stdin
+                request_json = request.to_json() + "\n"
+                self._process.stdin.write(request_json.encode())
+                await self._process.stdin.drain()
+                
+                self._request_count += 1
+                logger.debug(f"Sent request {request.request_id}: {request.method}")
+                
+            except Exception as e:
+                self._error_count += 1
+                if request.request_id in self._pending_requests:
+                    del self._pending_requests[request.request_id]
+                return MCPResponse.from_error(
+                    request.request_id,
+                    JSONRPCErrorCode.INTERNAL_ERROR,
+                    f"Failed to send request: {e}"
+                )
+        
+        # Wait for response with timeout
+        try:
+            data = await asyncio.wait_for(future, timeout=self.timeout)
+            latency_ms = (time.time() - start_time) * 1000
+            
+            return MCPResponse.from_dict(data, latency_ms=latency_ms)
+            
+        except asyncio.TimeoutError:
+            self._error_count += 1
+            if request.request_id in self._pending_requests:
+                del self._pending_requests[request.request_id]
+            return MCPResponse.from_error(
+                request.request_id,
+                JSONRPCErrorCode.INTERNAL_ERROR,
+                f"Request timeout after {self.timeout}s"
+            )
+        except asyncio.CancelledError:
+            if request.request_id in self._pending_requests:
+                del self._pending_requests[request.request_id]
+            raise
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if transport is connected"""
+        return (
+            self._connected and 
+            self._process is not None and 
+            self._process.returncode is None
+        )
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get transport statistics"""
+        return {
+            "type": "stdio",
+            "command": f"{self.command} {' '.join(self.args)}",
+            "connected": self.is_connected,
+            "process_pid": self._process.pid if self._process else None,
+            "request_count": self._request_count,
+            "error_count": self._error_count,
+            "pending_requests": len(self._pending_requests)
+        }
+
+
 class StreamableHTTPTransport(MCPTransport):
     """
     Streamable HTTP transport for MCP.

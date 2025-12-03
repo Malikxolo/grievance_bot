@@ -2,7 +2,10 @@
 
 ## 📋 Overview
 
-This document outlines the phased implementation plan for integrating Zapier MCP into the CS-Agent chatbot system. The goal is to enable access to 8000+ app integrations through a single MCP client.
+This document outlines the implementation of MCP integrations in the CS-Agent chatbot system. Currently supports:
+
+- **Zapier MCP**: 8000+ app integrations via HTTP transport
+- **MongoDB MCP**: MongoDB Atlas database operations via stdio transport
 
 ---
 
@@ -12,32 +15,36 @@ This document outlines the phased implementation plan for integrating Zapier MCP
 ┌─────────────────────────────────────────────────────────────────┐
 │                      OptimizedAgent                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │ web_search  │  │     rag     │  │   ZapierToolManager     │ │
+│  │ web_search  │  │     rag     │  │   Tool Managers         │ │
 │  └─────────────┘  └─────────────┘  └───────────┬─────────────┘ │
 └──────────────────────────────────────────────────┼──────────────┘
                                                    │
-                                    ┌──────────────▼──────────────┐
-                                    │     ZapierMCPClient         │
-                                    └──────────────┬──────────────┘
-                                                   │
-                                    ┌──────────────▼──────────────┐
-                                    │        MCPClient            │
-                                    └──────────────┬──────────────┘
-                                                   │
-                                    ┌──────────────▼──────────────┐
-                                    │  StreamableHTTPTransport    │
-                                    └──────────────┬──────────────┘
-                                                   │
-                                          HTTPS (JSON-RPC)
-                                                   │
-                                    ┌──────────────▼──────────────┐
-                                    │    Zapier MCP Server        │
-                                    │    (mcp.zapier.com)         │
-                                    └──────────────┬──────────────┘
-                                                   │
-                    ┌──────────┬───────────┬───────┴────┬──────────┐
-                    ▼          ▼           ▼            ▼          ▼
-                 Gmail      Slack      Sheets       HubSpot    +7995
+                    ┌──────────────────────────────┼──────────────────────┐
+                    │                              │                      │
+         ┌──────────▼──────────┐      ┌────────────▼────────────┐        │
+         │  ZapierToolManager  │      │  MongoDBToolManager     │        │
+         └──────────┬──────────┘      └────────────┬────────────┘        │
+                    │                              │                      │
+         ┌──────────▼──────────┐      ┌────────────▼────────────┐        │
+         │  ZapierMCPClient    │      │  MongoDBMCPClient       │        │
+         └──────────┬──────────┘      └────────────┬────────────┘        │
+                    │                              │                      │
+         ┌──────────▼──────────┐      ┌────────────▼────────────┐        │
+         │ StreamableHTTPTransport│    │   StdioTransport        │       │
+         └──────────┬──────────┘      └────────────┬────────────┘        │
+                    │                              │                      │
+          HTTPS (JSON-RPC)                   Stdio (JSON-RPC)            │
+                    │                              │                      │
+         ┌──────────▼──────────┐      ┌────────────▼────────────┐        │
+         │ Zapier MCP Server   │      │ MongoDB MCP Server      │        │
+         │ (mcp.zapier.com)    │      │ (@mongodb-js/mcp-server)│        │
+         └──────────┬──────────┘      └────────────┬────────────┘        │
+                    │                              │                      │
+    ┌──────┬───────┴────┬─────┐           ┌───────▼───────┐              │
+    ▼      ▼            ▼     ▼           ▼               ▼              │
+ Gmail  Slack       Sheets HubSpot   MongoDB Atlas   Collections         │
+                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -52,10 +59,14 @@ core/mcp/
 ├── transport.py             ✅ HTTP/SSE transport (IMPLEMENTED)
 ├── client.py                ✅ Base MCP client (IMPLEMENTED)
 ├── zapier_integration.py    ✅ Zapier wrapper (IMPLEMENTED)
+├── mongodb.py               ✅ MongoDB MCP client (IMPLEMENTED)
 └── IMPLEMENTATION_PLAN.md   ✅ This document
 
 Integration:
 ├── core/tools.py            ✅ Updated ToolManager with Zapier support
+
+Tests:
+├── tests/test_mongodb_mcp.py  ✅ MongoDB MCP tests (24 tests)
 ```
 
 ---
@@ -74,19 +85,24 @@ MCP_ENABLED=true
 # ⚠️ NEVER commit this to version control!
 ZAPIER_MCP_SERVER_URL=https://mcp.zapier.com/api/v1/your-server-id
 
+# MongoDB Connection String (for MongoDB MCP)
+# ⚠️ NEVER commit this to version control!
+MONGODB_CONNECTION_STRING=mongodb+srv://user:password@cluster.mongodb.net/
+
 # Optional: Additional secret for enhanced security
 ZAPIER_MCP_SERVER_SECRET=optional-additional-secret
 ```
 
 ### Security Features Implemented
 
-| Feature               | Status | Description                       |
-| --------------------- | ------ | --------------------------------- |
-| URL Masking           | ✅     | Server URLs never logged in full  |
-| Environment Variables | ✅     | Credentials loaded from .env only |
-| Credential Rotation   | ✅     | Support for rotating server URLs  |
-| Expiration Tracking   | ✅     | Detection of expired credentials  |
-| Data Masking          | ✅     | Sensitive params masked in logs   |
+| Feature               | Status | Description                        |
+| --------------------- | ------ | ---------------------------------- |
+| URL Masking           | ✅     | Server URLs never logged in full   |
+| Environment Variables | ✅     | Credentials loaded from .env only  |
+| Credential Rotation   | ✅     | Support for rotating server URLs   |
+| Expiration Tracking   | ✅     | Detection of expired credentials   |
+| Data Masking          | ✅     | Sensitive params masked in logs    |
+| Password Masking      | ✅     | Connection string passwords masked |
 
 ---
 
@@ -102,6 +118,17 @@ ZAPIER_MCP_SERVER_SECRET=optional-additional-secret
 ### Phase 2: Transport Layer ✅ COMPLETE
 
 - [x] Add `aiohttp` dependency (already in requirements.txt)
+- [x] Implement StreamableHTTPTransport (for Zapier - HTTP)
+- [x] Implement StdioTransport (for MongoDB - subprocess)
+
+### Phase 3: MongoDB MCP ✅ COMPLETE
+
+- [x] Create MongoDBMCPClient class
+- [x] Create MongoDBToolManager class
+- [x] Implement StdioTransport for subprocess communication
+- [x] Tool discovery from MCP server
+- [x] Tool execution via MCP protocol
+- [x] Unit tests (24 tests passing)
 - [x] Implement `StreamableHTTPTransport.connect()`
 - [x] Implement `StreamableHTTPTransport.send_request()`
 - [x] Add retry logic with exponential backoff
