@@ -407,17 +407,47 @@ class MongoDBMCPClient:
             properties = schema.get("properties", {})
             required = schema.get("required", [])
             
-            # Format parameters
+            # Format parameters with full schema for complex types
             params_parts = []
+            complex_params = []  # Store complex parameter schemas to show separately
+            
             for param_name, param_info in properties.items():
                 param_type = param_info.get("type", "any")
                 is_req = "*" if param_name in required else ""
-                params_parts.append(f"{param_name}{is_req}:{param_type}")
+                
+                # Check if this is a complex type that needs expanded schema
+                if param_type == "array" and "items" in param_info:
+                    items = param_info["items"]
+                    # Check for anyOf (union types) or complex object structure
+                    if "anyOf" in items:
+                        # This is a complex parameter - mark it and store schema
+                        params_parts.append(f"{param_name}{is_req}:array[object]")
+                        complex_params.append((param_name, param_info))
+                    elif items.get("type") == "object":
+                        params_parts.append(f"{param_name}{is_req}:array[object]")
+                    else:
+                        params_parts.append(f"{param_name}{is_req}:{param_type}")
+                else:
+                    params_parts.append(f"{param_name}{is_req}:{param_type}")
             
             params_str = ", ".join(params_parts) if params_parts else "no params"
             
             lines.append(f"- **{name}**: {desc}")
             lines.append(f"  Params: {params_str}")
+            
+            # Add detailed schema for complex parameters
+            for param_name, param_info in complex_params:
+                items = param_info.get("items", {})
+                if "anyOf" in items:
+                    lines.append(f"  {param_name} format: array of objects with structure:")
+                    for option in items["anyOf"]:
+                        if option.get("type") == "object":
+                            option_props = option.get("properties", {})
+                            name_const = option_props.get("name", {}).get("const", "unknown")
+                            args_props = option_props.get("arguments", {}).get("properties", {})
+                            args_list = list(args_props.keys())
+                            lines.append(f'    - {{"name": "{name_const}", "arguments": {{{", ".join(args_list)}}}}}')
+            
             lines.append("")
         
         # Add important notes

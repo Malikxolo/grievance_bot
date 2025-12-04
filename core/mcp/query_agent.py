@@ -106,7 +106,14 @@ CRITICAL RULES:
 6. For update operations, you MUST know what to update - if not specified, ask for clarification
 7. For delete operations, you MUST know which document to delete - if not specified, ask for clarification
 
-RESPONSE FORMAT (JSON only, no other text):
+PARAMETER FORMAT RULES (VERY IMPORTANT):
+- NEVER include null values - omit optional parameters if not needed
+- String parameters must be strings, NOT arrays (e.g., "method": "find" NOT "method": ["find"])
+- Number parameters must be numbers (e.g., "limit": 10 NOT "limit": "10")
+- Only include parameters that are explicitly needed for the operation
+- When in doubt about optional params, omit them entirely
+
+RESPONSE FORMAT (JSON only, no markdown, no backticks):
 
 If all required info is available:
 {
@@ -165,6 +172,7 @@ class QueryAgent:
         if llm_client is not None:
             self.llm_client = llm_client
             self.llm_config = getattr(llm_client, "config", None)
+            self._owns_client = False  # Don't close shared client
         else:
             # Load simple config from .env if not provided
             if llm_config is None:
@@ -173,11 +181,23 @@ class QueryAgent:
                 self.llm_config = llm_config
             # Create a dedicated client using the universal LLMClient wrapper
             self.llm_client = LLMClient(self.llm_config)
+            self._owns_client = True  # We own this client, must close it
         
         logger.info("✅ QueryAgent initialized")
         if self.llm_config:
             logger.info(f"   Provider: {self.llm_config.provider}")
             logger.info(f"   Model: {self.llm_config.model}")
+    
+    async def close(self) -> None:
+        """
+        Close resources (LLM client session).
+        
+        Call this when done using the QueryAgent to prevent
+        unclosed session warnings.
+        """
+        if self._owns_client and self.llm_client:
+            await self.llm_client.close_session()
+            logger.debug("QueryAgent LLM client session closed")
     
     def _load_config_from_env(self) -> LLMConfig:
         """Load LLM config from environment variables (HEART config)"""
@@ -261,6 +281,9 @@ class QueryAgent:
             tool_name = parsed["tool"]
             params = parsed.get("params", {})
             
+            # Step 4.5: Sanitize parameters (fix common LLM mistakes)
+            params = self._sanitize_params(params, tools_prompt, tool_name)
+            
             logger.info(f"📋 Selected tool: {tool_name}")
             logger.info(f"   Params: {json.dumps(params, indent=2)}")
             
@@ -331,37 +354,165 @@ Respond with JSON only."""
         return response
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """Parse LLM response to extract tool and params"""
+        """
+        Parse LLM response to extract tool and params.
         
-        # Try to extract JSON from response
+        UNIVERSAL DESIGN: Works with any database MCP client by extracting
+        JSON from various LLM response formats (raw, markdown, mixed).
+        """
+        import re
+        
+        if not response or not response.strip():
+            return {
+                "tool": None,
+                "error": "Empty response from LLM"
+            }
+        
+        response = response.strip()
+        
+        # Strategy 1: Direct JSON parse (cleanest case)
         try:
-            # First try direct JSON parse
             return json.loads(response)
         except json.JSONDecodeError:
             pass
         
-        # Try to find JSON in markdown code block
-        import re
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
-        if json_match:
+        # Strategy 2: Extract JSON from markdown code block
+        # Handles: ```json {...} ``` or ``` {...} ```
+        json_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
+        if json_block_match:
             try:
-                return json.loads(json_match.group(1))
+                return json.loads(json_block_match.group(1))
             except json.JSONDecodeError:
                 pass
         
-        # Try to find raw JSON object
+        # Strategy 3: Find the outermost balanced JSON object
+        # This handles cases where LLM returns text before/after JSON
+        brace_start = response.find('{')
+        if brace_start != -1:
+            # Find matching closing brace using a simple brace counter
+            depth = 0
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(response[brace_start:], brace_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                
+                if char == '\\':
+                    escape_next = True
+                    continue
+                
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                
+                if not in_string:
+                    if char == '{':
+                        depth += 1
+                    elif char == '}':
+                        depth -= 1
+                        if depth == 0:
+                            # Found complete JSON object
+                            json_str = response[brace_start:i + 1]
+                            try:
+                                return json.loads(json_str)
+                            except json.JSONDecodeError:
+                                break
+        
+        # Strategy 4: Try to fix common LLM JSON errors
+        # Sometimes LLMs add trailing commas or leave incomplete
         json_match = re.search(r'\{[\s\S]*\}', response)
         if json_match:
+            json_str = json_match.group(0)
+            # Remove trailing commas before closing braces/brackets
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
             try:
-                return json.loads(json_match.group(0))
+                return json.loads(json_str)
             except json.JSONDecodeError:
                 pass
         
-        # Failed to parse
+        # Failed to parse - return error with useful context
+        safe_response = response[:200] if len(response) > 200 else response
         return {
             "tool": None,
-            "error": f"Could not parse LLM response: {response[:200]}"
+            "error": f"Could not parse LLM response as JSON: {safe_response}"
         }
+    
+    def _sanitize_params(
+        self,
+        params: Dict[str, Any],
+        tools_prompt: str,
+        tool_name: str
+    ) -> Dict[str, Any]:
+        """
+        Sanitize and fix common LLM parameter mistakes.
+        
+        UNIVERSAL DESIGN: Works with any database tool by fixing
+        common type mismatches that LLMs make:
+        - Arrays with single element when string expected
+        - Empty strings that should be omitted
+        - Type conversions (string numbers to actual numbers)
+        - null/None values that should be omitted
+        
+        Args:
+            params: Raw parameters from LLM
+            tools_prompt: Tools prompt for schema lookup
+            tool_name: Name of selected tool
+            
+        Returns:
+            Sanitized parameters
+        """
+        import re
+        
+        # Known string parameters that LLMs sometimes wrap in arrays
+        # These are always strings, never arrays
+        # NOTE: "method" is NOT here because for 'explain' tool it IS an array of objects
+        STRING_PARAMS = {"database", "collection", "newName", "projectId"}
+        
+        sanitized = {}
+        
+        for key, value in params.items():
+            # Fix 0: Skip null/None values for optional parameters
+            # LLMs often include "limit": null which databases reject
+            if value is None:
+                param_pattern = rf'{key}\*:'  # Required params have asterisk
+                if not re.search(param_pattern, tools_prompt):
+                    logger.debug(f"Sanitized {key}: skipping null optional value")
+                    continue
+            
+            # Fix 1: Unwrap single-element arrays that should be scalar values
+            # LLMs sometimes return {"database": ["test"]} instead of {"database": "test"}
+            if isinstance(value, list) and len(value) == 1:
+                # Check if this is a known string param OR not documented as array
+                if key in STRING_PARAMS:
+                    value = value[0]
+                    logger.debug(f"Sanitized {key}: unwrapped known string param from array")
+                else:
+                    param_pattern = rf'{key}\*?:\s*array'
+                    if not re.search(param_pattern, tools_prompt, re.IGNORECASE):
+                        # Not documented as array, unwrap single element
+                        value = value[0]
+                        logger.debug(f"Sanitized {key}: unwrapped single-element array to scalar")
+            
+            # Fix 2: Convert numeric strings to actual numbers where appropriate
+            if isinstance(value, str) and value.isdigit():
+                param_pattern = rf'{key}\*?:\s*(integer|number)'
+                if re.search(param_pattern, tools_prompt, re.IGNORECASE):
+                    value = int(value)
+                    logger.debug(f"Sanitized {key}: converted string to int")
+            
+            # Fix 3: Skip empty optional values that might cause issues
+            # Keep empty strings/dicts for required params
+            if value == "" or value == {} or value == []:
+                param_pattern = rf'{key}\*:'  # Required params have asterisk
+                if not re.search(param_pattern, tools_prompt):
+                    logger.debug(f"Sanitized {key}: skipping empty optional value")
+                    continue
+            
+            sanitized[key] = value
+        
+        return sanitized
 
 
 # =============================================================================
