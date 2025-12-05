@@ -37,8 +37,8 @@ class OptimizedAgent:
         self.language_detector_llm = language_detector_llm
         self.language_detection_enabled = language_detector_llm is not None
         self.tool_manager = tool_manager
-        # Include Zapier and MongoDB tools if available
-        self.available_tools = tool_manager.get_available_tools(include_zapier=True, include_mongodb=True)
+        # Include Zapier, MongoDB, and Redis tools if available
+        self.available_tools = tool_manager.get_available_tools(include_zapier=True, include_mongodb=True, include_redis=True)
         self.memory = AsyncMemory(memory_config)
         self.task_queue: asyncio.Queue["AddBackgroundTask"] = asyncio.Queue()
         self._worker_started = False
@@ -46,9 +46,10 @@ class OptimizedAgent:
         # Initialize Redis cache manager
         self.cache_manager = RedisCacheManager()
         
-        # Track Zapier and MongoDB availability for prompts
+        # Track Zapier, MongoDB, and Redis availability for prompts
         self._zapier_available = tool_manager.zapier_available
         self._mongodb_available = tool_manager.mongodb_available
+        self._redis_available = tool_manager.redis_available
         
         logger.info(f"OptimizedAgent initialized with tools: {self.available_tools}")
         logger.info(f"Router LLM: {'DEDICATED ✅' if router_llm else 'SHARED (heart_llm) ⚠️'}")
@@ -59,6 +60,8 @@ class OptimizedAgent:
             logger.info(f"Zapier MCP: ENABLED ✅ ({zapier_count} tools available)")
         if self._mongodb_available:
             logger.info(f"MongoDB MCP: ENABLED ✅")
+        if self._redis_available:
+            logger.info(f"Redis MCP: ENABLED ✅")
     
     def _get_tools_prompt_section(self) -> str:
         """
@@ -68,6 +71,7 @@ class OptimizedAgent:
         1. Including base tools (web_search, rag, calculator)
         2. If Zapier is available, dynamically loading ALL Zapier tools
         3. If MongoDB is available, adding database operations
+        4. If Redis is available, adding cache/key-value operations
         
         UNIVERSAL DESIGN: When tools are added/removed,
         the prompt automatically updates - NO code changes required.
@@ -83,6 +87,13 @@ class OptimizedAgent:
   Use when: User wants to store data, retrieve records, update database entries, or delete data
   Examples: "add user to database", "find all orders", "update customer email", "delete old records"
   IMPORTANT: Provide natural language instruction - the system will convert it to database query"""
+        
+        if self._redis_available:
+            base_tools += """
+- redis: Key-value store operations (set, get, hashes, lists, sets, sorted sets, streams)
+  Use when: User wants to cache data, store session info, manage queues, pub/sub, or fast key-value operations
+  Examples: "store user session", "cache this data", "add to queue", "get value for key", "increment counter"
+  IMPORTANT: Provide natural language instruction - the system will convert it to Redis command"""
         
         if self._zapier_available:
             # Get dynamic prompt with ALL Zapier tools (universal - auto-updates)
@@ -1810,6 +1821,30 @@ Think through each question naturally, then return ONLY the JSON. No other text.
                         error_msg = result.get('error', 'Unknown error')
                         formatted.append(f"{tool.upper()} ERROR:\n{error_msg}\n")
                         logger.warning(f"MongoDB tool error: {error_msg}")
+                    continue
+                
+                # Handle Redis MCP tool results
+                if result.get('provider') == 'redis_mcp':
+                    if result.get('needs_clarification'):
+                        # Redis needs more info from user
+                        clarification_msg = result.get('clarification_message', 'Please provide more details.')
+                        missing = result.get('missing_fields', [])
+                        if missing:
+                            formatted.append(f"{tool.upper()} NEEDS CLARIFICATION:\n{clarification_msg}\nMissing: {', '.join(missing)}\n")
+                        else:
+                            formatted.append(f"{tool.upper()} NEEDS CLARIFICATION:\n{clarification_msg}\n")
+                        logger.info(f"Redis tool needs clarification: {clarification_msg}")
+                    elif result.get('success'):
+                        # Successful Redis operation
+                        redis_result = result.get('result', 'Operation completed')
+                        executed_tool = result.get('executed_tool', 'unknown')
+                        formatted.append(f"{tool.upper()} COMPLETED SUCCESSFULLY:\nOperation: {executed_tool}\nResult: {redis_result}\n")
+                        logger.info(f"Redis tool {executed_tool} executed successfully")
+                    else:
+                        # Redis error
+                        error_msg = result.get('error', 'Unknown error')
+                        formatted.append(f"{tool.upper()} ERROR:\n{error_msg}\n")
+                        logger.warning(f"Redis tool error: {error_msg}")
                     continue
                 
                 # Handle RAG-style result

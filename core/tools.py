@@ -976,6 +976,9 @@ class ToolManager:
         self._mongodb_manager = None
         self._query_agent = None
         
+        # Redis integration
+        self._redis_manager = None
+        
         self._initialize_tools()
         
         logger.info(f"ToolManager initialized with web model: {web_model}")
@@ -1233,10 +1236,70 @@ class ToolManager:
             logger.error(f"❌ MongoDB MCP initialization error: {e}")
             return False
     
+    async def initialize_redis_async(self) -> bool:
+        """
+        Initialize Redis MCP integration (async).
+        
+        Call this after ToolManager creation to enable Redis tools.
+        Redis requires async initialization for MCP server connection.
+        
+        Returns:
+            True if Redis initialized successfully
+        """
+        # Check if Redis URL is configured
+        redis_url = os.getenv("REDIS_MCP_URL")
+        
+        if not redis_url:
+            logger.info("ℹ️ Redis MCP integration disabled (REDIS_MCP_URL not set)")
+            return False
+        
+        try:
+            # Import here to avoid circular imports
+            from .mcp.redis import RedisMCPClient
+            from .mcp.query_agent import QueryAgent
+            
+            logger.info("🔄 Initializing Redis MCP integration...")
+            
+            # Create Redis MCP client
+            self._redis_manager = RedisMCPClient(redis_url=redis_url)
+            
+            # Connect to MCP server
+            connected = await self._redis_manager.connect()
+            
+            if connected:
+                # Create QueryAgent with shared LLM client if not already created
+                if self._query_agent is None:
+                    self._query_agent = QueryAgent(llm_client=self.llm_client)
+                
+                tools = await self._redis_manager.list_tools()
+                logger.info(f"✅ Redis MCP integration initialized with {len(tools)} tools")
+                
+                # Log some example tools
+                if tools:
+                    examples = [t.name for t in tools[:5]]
+                    logger.info(f"   📋 Example tools: {', '.join(examples)}")
+                
+                return True
+            else:
+                logger.warning("⚠️ Redis MCP connection failed")
+                return False
+                
+        except ImportError as e:
+            logger.warning(f"⚠️ Redis MCP module not available: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Redis MCP initialization error: {e}")
+            return False
+    
     @property
     def mongodb_available(self) -> bool:
         """Check if MongoDB tools are available"""
         return self._mongodb_manager is not None and self._mongodb_manager.is_connected
+    
+    @property
+    def redis_available(self) -> bool:
+        """Check if Redis tools are available"""
+        return self._redis_manager is not None and self._redis_manager.is_connected
     
     @property
     def zapier_available(self) -> bool:
@@ -1277,13 +1340,14 @@ class ToolManager:
         """Get tool by name"""
         return self.tools.get(name)
     
-    def get_available_tools(self, include_zapier: bool = False, include_mongodb: bool = False) -> List[str]:
+    def get_available_tools(self, include_zapier: bool = False, include_mongodb: bool = False, include_redis: bool = False) -> List[str]:
         """
         Get list of available tool names.
         
         Args:
             include_zapier: Include Zapier tools in the list
             include_mongodb: Include MongoDB tool in the list
+            include_redis: Include Redis tool in the list
             
         Returns:
             List of tool names
@@ -1295,6 +1359,9 @@ class ToolManager:
         
         if include_mongodb and self._mongodb_manager and self._mongodb_manager.is_connected:
             tools.append("mongodb")
+        
+        if include_redis and self._redis_manager and self._redis_manager.is_connected:
+            tools.append("redis")
         
         return tools
     
@@ -1439,6 +1506,70 @@ class ToolManager:
                     "error": f"MongoDB tool execution failed: {str(e)}",
                     "tool_name": tool_name,
                     "provider": "mongodb_mcp"
+                }
+        
+        # Check if it's a Redis tool
+        if tool_name == "redis" and self._redis_manager and self._query_agent:
+            logger.info(f"🔧 Executing Redis tool via QueryAgent")
+            
+            try:
+                query = kwargs.get("query", "")
+                
+                if not query:
+                    return {
+                        "success": False,
+                        "error": "No query provided for Redis operation",
+                        "tool_name": tool_name,
+                        "provider": "redis_mcp"
+                    }
+                
+                # Get tools prompt from Redis MCP client
+                tools_prompt = self._redis_manager.get_tools_prompt()
+                
+                # Execute via QueryAgent (NL → structured query → execution)
+                result = await self._query_agent.execute(
+                    tools_prompt=tools_prompt,
+                    instruction=query,
+                    mcp_client=self._redis_manager
+                )
+                
+                # Convert QueryResult to dict format
+                if result.needs_clarification:
+                    logger.info(f"❓ Redis needs clarification: {result.clarification_message}")
+                    return {
+                        "success": False,
+                        "needs_clarification": True,
+                        "clarification_message": result.clarification_message,
+                        "missing_fields": result.missing_fields or [],
+                        "tool_name": tool_name,
+                        "provider": "redis_mcp"
+                    }
+                elif result.success:
+                    logger.info(f"✅ Redis tool executed successfully")
+                    return {
+                        "success": True,
+                        "result": result.result,
+                        "executed_tool": result.tool_name,
+                        "params": result.params,
+                        "tool_name": tool_name,
+                        "provider": "redis_mcp"
+                    }
+                else:
+                    logger.warning(f"⚠️ Redis tool failed: {result.error}")
+                    return {
+                        "success": False,
+                        "error": result.error,
+                        "tool_name": tool_name,
+                        "provider": "redis_mcp"
+                    }
+                
+            except Exception as e:
+                logger.error(f"❌ Redis tool error: {str(e)}")
+                return {
+                    "success": False,
+                    "error": f"Redis tool execution failed: {str(e)}",
+                    "tool_name": tool_name,
+                    "provider": "redis_mcp"
                 }
         
         # Standard tool execution

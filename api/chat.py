@@ -136,6 +136,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.error(f"❌ Failed to initialize MongoDB MCP: {e}")
 
+    # Initialize Redis MCP integration
+    try:
+        redis_initialized = await tool_manager.initialize_redis_async()
+        if redis_initialized:
+            logging.info("✅ Redis MCP integration initialized successfully")
+        else:
+            logging.warning("⚠️ Redis MCP integration not configured (REDIS_MCP_URL not set)")
+    except Exception as e:
+        logging.error(f"❌ Failed to initialize Redis MCP: {e}")
+
     # Initialize language detector if enabled
     language_detector_llm = None
     if config.language_detection_enabled:

@@ -1,35 +1,39 @@
 """
-MongoDB MCP Integration
+Redis MCP Integration
 =======================
 
-MCP client for MongoDB Atlas - connects to MongoDB's official MCP server.
-Same pattern as Zapier MCP integration.
+MCP client for Redis Database - connects to Redis's official MCP server.
+Same pattern as MongoDB MCP integration.
 
-MongoDB MCP Server: @mongodb-js/mongodb-mcp-server
-Docs: https://github.com/mongodb-js/mongodb-mcp-server
+Redis MCP Server: redis-mcp-server (PyPI)
+Docs: https://github.com/redis/mcp-redis
 
-The MCP server provides tools like:
-- find, aggregate, count (read operations)
-- insertOne, updateOne, deleteOne (write operations)  
-- listCollections, listDatabases (schema discovery)
+The MCP server provides tools for:
+- String operations (set, get, mset, mget, setex, setnx, getdel, etc.)
+- Hash operations (hset, hget, hmset, hmget, hgetall, hdel, hkeys, etc.)
+- List operations (lpush, rpush, lpop, rpop, lrange, llen, etc.)
+- Set operations (sadd, srem, smembers, sismember, sinter, sunion, etc.)
+- Sorted set operations (zadd, zrem, zrange, zscore, zrank, etc.)
+- Key operations (keys, exists, del, expire, ttl, type, etc.)
+- Pub/Sub (publish, subscribe)
+- Streams (xadd, xread, xrange, xlen, etc.)
+- JSON operations (json.set, json.get, json.del, etc.)
+- Search/Query engine operations
 
 Usage:
-    from core.mcp.mongodb import MongoDBMCPClient, MongoDBToolManager
+    from core.mcp.redis import RedisMCPClient, RedisToolManager
     
-    # Using MongoDBToolManager (recommended - like ZapierToolManager)
-    manager = MongoDBToolManager(
-        security_manager=security_manager,
-        connection_string="mongodb+srv://..."
-    )
-    await manager.initialize()
-    tools = manager.get_tool_schemas()
-    result = await manager.execute("mongodb_find", {"database": "test", ...})
-    
-    # Or using MongoDBMCPClient directly
-    client = MongoDBMCPClient(connection_string="mongodb+srv://...")
+    # Using RedisMCPClient directly
+    client = RedisMCPClient(redis_url="redis://...")
     await client.connect()
     tools = await client.list_tools()
-    result = await client.execute_tool("find", {...})
+    result = await client.execute_tool("set", {"key": "foo", "value": "bar"})
+    
+    # Or using RedisToolManager (recommended - like MongoDBToolManager)
+    manager = RedisToolManager(redis_url="redis://...")
+    await manager.initialize()
+    tools = manager.get_tool_schemas()
+    result = await manager.execute("redis_set", {"key": "foo", "value": "bar"})
 """
 
 import asyncio
@@ -52,8 +56,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class MongoDBTool:
-    """Represents a tool from MongoDB MCP server"""
+class RedisTool:
+    """Represents a tool from Redis MCP server"""
     name: str
     description: str = ""
     input_schema: Dict[str, Any] = field(default_factory=dict)
@@ -73,8 +77,8 @@ class MongoDBTool:
 
 
 @dataclass
-class MongoDBToolResult:
-    """Result of MongoDB tool execution"""
+class RedisToolResult:
+    """Result of Redis tool execution"""
     success: bool
     result: Any = None
     error: str = None
@@ -82,43 +86,45 @@ class MongoDBToolResult:
     tool_name: str = ""
 
 
-class MongoDBMCPClient:
+class RedisMCPClient:
     """
-    MongoDB MCP Client - connects to MongoDB's official MCP server.
+    Redis MCP Client - connects to Redis's official MCP server.
     
-    The MongoDB MCP server runs as a subprocess and communicates via stdio.
-    This is the same pattern as other MCP servers (Claude Desktop, Cursor, etc.)
+    The Redis MCP server runs as a subprocess and communicates via stdio.
+    This is the same pattern as MongoDB MCP server.
     
-    MCP Server: npx -y @mongodb-js/mongodb-mcp-server
+    MCP Server: uvx --from redis-mcp-server@latest redis-mcp-server --url <redis_url>
     
-    The server exposes tools like:
-    - find: Query documents
-    - aggregate: Run aggregation pipeline
-    - insertOne/insertMany: Insert documents
-    - updateOne/updateMany: Update documents
-    - deleteOne/deleteMany: Delete documents
-    - listDatabases: List all databases
-    - listCollections: List collections in a database
-    - createIndex: Create database indexes
-    - dropCollection: Drop a collection
+    The server exposes tools for:
+    - String operations: set, get, mset, mget, setex, setnx, getdel, append, incr, decr
+    - Hash operations: hset, hget, hmset, hmget, hgetall, hdel, hkeys, hvals, hexists
+    - List operations: lpush, rpush, lpop, rpop, lrange, llen, lindex, lset
+    - Set operations: sadd, srem, smembers, sismember, sinter, sunion, sdiff, scard
+    - Sorted set operations: zadd, zrem, zrange, zrevrange, zscore, zrank, zcard
+    - Key operations: keys, exists, del, expire, ttl, type, rename, persist
+    - Pub/Sub: publish, subscribe
+    - Streams: xadd, xread, xrange, xlen, xinfo
+    - JSON: json.set, json.get, json.del, json.arrappend
+    - Search: ft.search, ft.create, ft.info
     """
     
-    # NPX command to run MongoDB MCP server
-    NPX_COMMAND = "npx"
-    MCP_SERVER_PACKAGE = "@mongodb-js/mongodb-mcp-server"
+    # UVX command to run Redis MCP server
+    UVX_COMMAND = "uvx"
+    MCP_SERVER_PACKAGE = "redis-mcp-server@latest"
+    MCP_SERVER_CMD = "redis-mcp-server"
     
     def __init__(
         self,
-        connection_string: str = None,
+        redis_url: str = None,
         timeout: int = 30,
-        startup_timeout: int = 120,  # MongoDB MCP server may take time to start
+        startup_timeout: int = 60,  # Redis MCP server startup time
         security_manager: Optional[MCPSecurityManager] = None,
     ):
         """
-        Initialize MongoDB MCP client.
+        Initialize Redis MCP client.
         
         Args:
-            connection_string: MongoDB connection string (mongodb+srv://...)
+            redis_url: Redis connection URL (redis://...)
             timeout: Request timeout in seconds
             startup_timeout: Timeout for server startup in seconds
             security_manager: Optional security manager for credential handling
@@ -127,12 +133,12 @@ class MongoDBMCPClient:
         self.startup_timeout = startup_timeout
         self.security_manager = security_manager
         
-        # Get connection string from param or environment (.env)
-        self._connection_string = connection_string or os.getenv("MONGODB_MCP_CONNECTION_STRING", "")
+        # Get Redis URL from param or environment (.env)
+        self._redis_url = redis_url or os.getenv("REDIS_MCP_URL", "")
         
         self._transport: Optional[StdioTransport] = None
         self._connected = False
-        self._tools: Dict[str, MongoDBTool] = {}
+        self._tools: Dict[str, RedisTool] = {}
         self._server_info: Dict[str, Any] = {}
         
         # Stats
@@ -141,20 +147,21 @@ class MongoDBMCPClient:
         self._error_count = 0
         self._connect_time: Optional[datetime] = None
         
-        logger.info("✅ MongoDBMCPClient initialized")
-        if self._connection_string:
-            masked = self._mask_connection_string(self._connection_string)
-            logger.info(f"   Connection: {masked}")
+        logger.info("✅ RedisMCPClient initialized")
+        if self._redis_url:
+            masked = self._mask_redis_url(self._redis_url)
+            logger.info(f"   Redis URL: {masked}")
     
     @staticmethod
-    def _mask_connection_string(conn_str: str) -> str:
-        """Mask password in connection string for logging"""
-        return re.sub(r':([^@/:]+)@', r':****@', conn_str)
+    def _mask_redis_url(url: str) -> str:
+        """Mask password in Redis URL for logging"""
+        # Mask password in redis://user:password@host:port format
+        return re.sub(r':([^@/:]+)@', r':****@', url)
     
     @property
     def is_configured(self) -> bool:
-        """Check if MongoDB MCP is configured"""
-        return bool(self._connection_string)
+        """Check if Redis MCP is configured"""
+        return bool(self._redis_url)
     
     @property
     def is_connected(self) -> bool:
@@ -163,7 +170,7 @@ class MongoDBMCPClient:
     
     async def connect(self) -> bool:
         """
-        Connect to MongoDB MCP server.
+        Connect to Redis MCP server.
         
         Starts the MCP server as a subprocess and connects via stdio.
         
@@ -171,24 +178,22 @@ class MongoDBMCPClient:
             True if connection successful
         """
         if self.is_connected:
-            logger.debug("Already connected to MongoDB MCP")
+            logger.debug("Already connected to Redis MCP")
             return True
         
         if not self.is_configured:
-            logger.error("❌ MongoDB not configured. Set connection_string or MONGODB_CONNECTION_STRING env var")
-            raise MCPConnectionError("MongoDB not configured - no connection string provided")
+            logger.error("❌ Redis not configured. Set redis_url or REDIS_MCP_URL env var")
+            raise MCPConnectionError("Redis not configured - no Redis URL provided")
         
         try:
-            logger.info("🔗 Starting MongoDB MCP server...")
+            logger.info("🔗 Starting Redis MCP server...")
             
             # Create stdio transport
-            # The MongoDB MCP server expects connection string as env variable
+            # The Redis MCP server expects --url argument for connection
             self._transport = StdioTransport(
-                command=self.NPX_COMMAND,
-                args=["-y", self.MCP_SERVER_PACKAGE],
-                env={
-                    "MDB_MCP_CONNECTION_STRING": self._connection_string
-                },
+                command=self.UVX_COMMAND,
+                args=["--from", self.MCP_SERVER_PACKAGE, self.MCP_SERVER_CMD, "--url", self._redis_url],
+                env={},  # Redis MCP uses --url arg, not env var
                 timeout=self.timeout,
                 startup_timeout=self.startup_timeout
             )
@@ -202,21 +207,21 @@ class MongoDBMCPClient:
                 # Load available tools
                 await self._discover_tools()
                 
-                logger.info(f"✅ Connected to MongoDB MCP server")
+                logger.info(f"✅ Connected to Redis MCP server")
                 logger.info(f"   Available tools: {len(self._tools)}")
                 
                 if self._tools:
                     logger.info(f"   Tools: {', '.join(list(self._tools.keys())[:5])}...")
             else:
-                logger.error("❌ Failed to connect to MongoDB MCP server")
+                logger.error("❌ Failed to connect to Redis MCP server")
             
             return self._connected
             
         except FileNotFoundError:
-            logger.error(f"❌ npx not found. Make sure Node.js is installed and npx is in PATH")
-            raise MCPConnectionError("npx not found - install Node.js")
+            logger.error(f"❌ uvx not found. Make sure uv/uvx is installed (pip install uv)")
+            raise MCPConnectionError("uvx not found - install uv package manager")
         except Exception as e:
-            logger.error(f"❌ MongoDB MCP connection failed: {e}")
+            logger.error(f"❌ Redis MCP connection failed: {e}")
             await self.disconnect()
             raise MCPConnectionError(f"Connection failed: {e}")
     
@@ -238,14 +243,14 @@ class MongoDBMCPClient:
                 tools_data = response.result.get("tools", [])
                 
                 for tool_data in tools_data:
-                    tool = MongoDBTool(
+                    tool = RedisTool(
                         name=tool_data.get("name", ""),
                         description=tool_data.get("description", ""),
                         input_schema=tool_data.get("inputSchema", {})
                     )
                     self._tools[tool.name] = tool
                 
-                logger.info(f"📋 Discovered {len(self._tools)} MongoDB tools")
+                logger.info(f"📋 Discovered {len(self._tools)} Redis tools")
                 
             elif response.error:
                 logger.warning(f"⚠️ Could not discover tools: {response.error_message}")
@@ -254,7 +259,7 @@ class MongoDBMCPClient:
             logger.warning(f"⚠️ Tool discovery failed: {e}")
     
     async def disconnect(self):
-        """Disconnect from MongoDB MCP server"""
+        """Disconnect from Redis MCP server"""
         if self._transport:
             await self._transport.disconnect()
             self._transport = None
@@ -262,21 +267,21 @@ class MongoDBMCPClient:
         self._connected = False
         self._tools.clear()
         
-        logger.info("✅ MongoDB MCP disconnected")
+        logger.info("✅ Redis MCP disconnected")
     
-    async def list_tools(self) -> List[MongoDBTool]:
+    async def list_tools(self) -> List[RedisTool]:
         """
         Get list of available tools.
         
         Returns:
-            List of MongoDBTool objects
+            List of RedisTool objects
         """
         if not self.is_connected:
-            raise MCPConnectionError("Not connected to MongoDB MCP server")
+            raise MCPConnectionError("Not connected to Redis MCP server")
         
         return list(self._tools.values())
     
-    def get_tool(self, name: str) -> Optional[MongoDBTool]:
+    def get_tool(self, name: str) -> Optional[RedisTool]:
         """Get specific tool by name"""
         return self._tools.get(name)
     
@@ -284,19 +289,19 @@ class MongoDBMCPClient:
         self,
         tool_name: str,
         params: Dict[str, Any]
-    ) -> MongoDBToolResult:
+    ) -> RedisToolResult:
         """
-        Execute a MongoDB MCP tool.
+        Execute a Redis MCP tool.
         
         Args:
-            tool_name: Name of tool (find, insertOne, aggregate, etc.)
-            params: Tool parameters (database, collection, filter, etc.)
+            tool_name: Name of tool (set, get, hset, lpush, etc.)
+            params: Tool parameters (key, value, field, etc.)
             
         Returns:
-            MongoDBToolResult with execution result
+            RedisToolResult with execution result
         """
         if not self.is_connected:
-            raise MCPConnectionError("Not connected to MongoDB MCP server")
+            raise MCPConnectionError("Not connected to Redis MCP server")
         
         if not self._transport:
             raise MCPConnectionError("Transport not available")
@@ -304,7 +309,7 @@ class MongoDBMCPClient:
         self._call_count += 1
         start_time = asyncio.get_event_loop().time()
         
-        logger.info(f"🚀 Executing MongoDB tool: {tool_name}")
+        logger.info(f"🚀 Executing Redis tool: {tool_name}")
         logger.debug(f"   Params: {params}")
         
         try:
@@ -336,16 +341,17 @@ class MongoDBMCPClient:
                         result_data = text_content
                 
                 # Check if the result text indicates an actual failure
-                # MongoDB MCP returns success=True at protocol level but error in content
                 result_str = str(result_data).lower()
                 failure_indicators = [
-                    "you need to connect",
-                    "connect to a mongodb instance",
-                    "failed to",
+                    "connection refused",
+                    "connection failed",
+                    "failed to connect",
                     "error:",
                     "unable to",
                     "access denied",
-                    "authentication failed"
+                    "authentication failed",
+                    "noauth",
+                    "wrongpass"
                 ]
                 
                 is_actual_failure = any(indicator in result_str for indicator in failure_indicators)
@@ -353,7 +359,7 @@ class MongoDBMCPClient:
                 if is_actual_failure:
                     self._error_count += 1
                     logger.error(f"❌ {tool_name} returned error in content: {result_data[:100]}...")
-                    return MongoDBToolResult(
+                    return RedisToolResult(
                         success=False,
                         error=str(result_data),
                         execution_time_ms=execution_time,
@@ -363,7 +369,7 @@ class MongoDBMCPClient:
                 self._success_count += 1
                 logger.info(f"✅ {tool_name} completed in {execution_time:.0f}ms")
                 
-                return MongoDBToolResult(
+                return RedisToolResult(
                     success=True,
                     result=result_data,
                     execution_time_ms=execution_time,
@@ -375,7 +381,7 @@ class MongoDBMCPClient:
                 
                 logger.error(f"❌ {tool_name} failed: {error_msg}")
                 
-                return MongoDBToolResult(
+                return RedisToolResult(
                     success=False,
                     error=error_msg,
                     execution_time_ms=execution_time,
@@ -387,7 +393,7 @@ class MongoDBMCPClient:
             error_msg = f"Tool execution timeout ({self.timeout}s)"
             logger.error(f"❌ {tool_name} timeout")
             
-            return MongoDBToolResult(
+            return RedisToolResult(
                 success=False,
                 error=error_msg,
                 tool_name=tool_name
@@ -397,7 +403,7 @@ class MongoDBMCPClient:
             self._error_count += 1
             logger.error(f"❌ Error executing {tool_name}: {e}")
             
-            return MongoDBToolResult(
+            return RedisToolResult(
                 success=False,
                 error=str(e),
                 tool_name=tool_name
@@ -407,19 +413,19 @@ class MongoDBMCPClient:
         """
         Generate tools description for LLM prompts.
         
-        Same format as Zapier tools in OptimizedAgent - includes tool names,
+        Same format as MongoDB tools - includes tool names,
         descriptions, and parameter info so LLM can generate correct queries.
         
         Returns:
-            Formatted string describing available MongoDB tools
+            Formatted string describing available Redis tools
         """
         if not self._tools:
             return ""
         
         lines = [
-            "## MongoDB Database Tools",
+            "## Redis Database Tools",
             "",
-            "Available MongoDB operations (use exact tool names):",
+            "Available Redis operations (use exact tool names):",
             ""
         ]
         
@@ -431,54 +437,21 @@ class MongoDBMCPClient:
             properties = schema.get("properties", {})
             required = schema.get("required", [])
             
-            # Format parameters with full schema for complex types
+            # Format parameters
             params_parts = []
-            complex_params = []  # Store complex parameter schemas to show separately
-            
             for param_name, param_info in properties.items():
                 param_type = param_info.get("type", "any")
                 is_req = "*" if param_name in required else ""
-                
-                # Check if this is a complex type that needs expanded schema
-                if param_type == "array" and "items" in param_info:
-                    items = param_info["items"]
-                    # Check for anyOf (union types) or complex object structure
-                    if "anyOf" in items:
-                        # This is a complex parameter - mark it and store schema
-                        params_parts.append(f"{param_name}{is_req}:array[object]")
-                        complex_params.append((param_name, param_info))
-                    elif items.get("type") == "object":
-                        params_parts.append(f"{param_name}{is_req}:array[object]")
-                    else:
-                        params_parts.append(f"{param_name}{is_req}:{param_type}")
-                else:
-                    params_parts.append(f"{param_name}{is_req}:{param_type}")
+                params_parts.append(f"{param_name}{is_req}:{param_type}")
             
             params_str = ", ".join(params_parts) if params_parts else "no params"
             
             lines.append(f"- **{name}**: {desc}")
             lines.append(f"  Params: {params_str}")
-            
-            # Add detailed schema for complex parameters
-            for param_name, param_info in complex_params:
-                items = param_info.get("items", {})
-                if "anyOf" in items:
-                    lines.append(f"  {param_name} format: array of objects with structure:")
-                    for option in items["anyOf"]:
-                        if option.get("type") == "object":
-                            option_props = option.get("properties", {})
-                            name_const = option_props.get("name", {}).get("const", "unknown")
-                            args_props = option_props.get("arguments", {}).get("properties", {})
-                            args_list = list(args_props.keys())
-                            lines.append(f'    - {{"name": "{name_const}", "arguments": {{{", ".join(args_list)}}}}}')
-            
             lines.append("")
         
-        # Add important notes
         lines.append("NOTES:")
         lines.append("- * = required parameter")
-        lines.append("- documents must be objects like {\"name\": \"value\"}")
-        lines.append("- filter uses MongoDB query syntax like {\"field\": \"value\"}")
         
         return "\n".join(lines)
     
@@ -497,17 +470,17 @@ class MongoDBMCPClient:
         }
 
 
-class MongoDBToolManager:
+class RedisToolManager:
     """
-    Bridge between MongoDBMCPClient and OptimizedAgent.
+    Bridge between RedisMCPClient and OptimizedAgent.
     
-    Same pattern as ZapierToolManager - provides tool schemas
+    Same pattern as MongoDBToolManager - provides tool schemas
     for LLM function calling and routes execution to MCP.
     
     Usage:
-        manager = MongoDBToolManager(
+        manager = RedisToolManager(
             security_manager=security_manager,
-            connection_string="mongodb+srv://..."
+            redis_url="redis://..."
         )
         await manager.initialize()
         
@@ -515,54 +488,53 @@ class MongoDBToolManager:
         schemas = manager.get_tool_schemas()
         
         # Execute tool (called by agent)
-        result = await manager.execute("mongodb_find", {
-            "database": "mydb",
-            "collection": "users",
-            "filter": {"active": true}
+        result = await manager.execute("redis_set", {
+            "key": "user:123",
+            "value": "John Doe"
         })
     """
     
     def __init__(
         self,
         security_manager: Optional[MCPSecurityManager] = None,
-        connection_string: str = None,
-        prefix: str = "mongodb_",
+        redis_url: str = None,
+        prefix: str = "redis_",
         timeout: int = 30
     ):
         """
-        Initialize MongoDB Tool Manager.
+        Initialize Redis Tool Manager.
         
         Args:
             security_manager: Optional security manager
-            connection_string: MongoDB connection string
-            prefix: Prefix for tool names (default: "mongodb_")
+            redis_url: Redis connection URL
+            prefix: Prefix for tool names (default: "redis_")
             timeout: Request timeout in seconds
         """
         self.security_manager = security_manager
-        self.connection_string = connection_string
+        self.redis_url = redis_url
         self.prefix = prefix
         self.timeout = timeout
         
-        self._client: Optional[MongoDBMCPClient] = None
+        self._client: Optional[RedisMCPClient] = None
         self._initialized = False
         self._tool_schemas: Dict[str, Dict[str, Any]] = {}
     
     async def initialize(self) -> bool:
         """
-        Initialize MongoDB MCP connection.
+        Initialize Redis MCP connection.
         
         Returns:
             True if initialization successful
         """
         try:
-            self._client = MongoDBMCPClient(
-                connection_string=self.connection_string,
+            self._client = RedisMCPClient(
+                redis_url=self.redis_url,
                 timeout=self.timeout,
                 security_manager=self.security_manager
             )
             
             if not self._client.is_configured:
-                logger.warning("⚠️ MongoDB MCP not configured - no connection string")
+                logger.warning("⚠️ Redis MCP not configured - no Redis URL")
                 return False
             
             connected = await self._client.connect()
@@ -575,20 +547,20 @@ class MongoDBToolManager:
                     prefixed_name = f"{self.prefix}{tool.name}"
                     self._tool_schemas[prefixed_name] = {
                         "name": prefixed_name,
-                        "description": f"[MongoDB] {tool.description}",
+                        "description": f"[Redis] {tool.description}",
                         "parameters": tool.input_schema,
                         "required": tool.required_params
                     }
                 
                 self._initialized = True
-                logger.info(f"✅ MongoDBToolManager initialized ({len(self._tool_schemas)} tools)")
+                logger.info(f"✅ RedisToolManager initialized ({len(self._tool_schemas)} tools)")
                 
                 return True
             
             return False
             
         except Exception as e:
-            logger.error(f"❌ MongoDB initialization failed: {e}")
+            logger.error(f"❌ Redis initialization failed: {e}")
             return False
     
     @property
@@ -598,7 +570,7 @@ class MongoDBToolManager:
     
     @property
     def is_connected(self) -> bool:
-        """Check if MongoDB is connected"""
+        """Check if Redis is connected"""
         return self._client is not None and self._client.is_connected
     
     def get_tool_names(self) -> List[str]:
@@ -632,7 +604,7 @@ class MongoDBToolManager:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Execute a MongoDB tool.
+        Execute a Redis tool.
         
         Args:
             tool_name: Tool name (with or without prefix)
@@ -644,8 +616,8 @@ class MongoDBToolManager:
         if not self._initialized or not self._client:
             return {
                 "success": False,
-                "error": "MongoDB not initialized",
-                "provider": "mongodb_mcp"
+                "error": "Redis not initialized",
+                "provider": "redis_mcp"
             }
         
         # Remove prefix if present
@@ -662,7 +634,7 @@ class MongoDBToolManager:
                 "result": result.result,
                 "error": result.error,
                 "execution_time_ms": result.execution_time_ms,
-                "provider": "mongodb_mcp"
+                "provider": "redis_mcp"
             }
             
         except MCPConnectionError as e:
@@ -670,14 +642,14 @@ class MongoDBToolManager:
                 "success": False,
                 "tool": tool_name,
                 "error": f"Connection error: {e}",
-                "provider": "mongodb_mcp"
+                "provider": "redis_mcp"
             }
         except Exception as e:
             return {
                 "success": False,
                 "tool": tool_name,
                 "error": str(e),
-                "provider": "mongodb_mcp"
+                "provider": "redis_mcp"
             }
     
     def get_stats(self) -> Dict[str, Any]:
@@ -695,7 +667,7 @@ class MongoDBToolManager:
         return stats
     
     async def close(self):
-        """Close MongoDB connection"""
+        """Close Redis connection"""
         if self._client:
             await self._client.disconnect()
             self._client = None
@@ -703,7 +675,7 @@ class MongoDBToolManager:
         self._initialized = False
         self._tool_schemas.clear()
         
-        logger.info("✅ MongoDBToolManager closed")
+        logger.info("✅ RedisToolManager closed")
     
     async def __aenter__(self):
         """Async context manager entry"""
