@@ -79,7 +79,7 @@ def upload_local_files(user_id: str, collection_name: str, file_paths: list[str]
     return response.json()
 
 
-async def mog_query(user_id: str, chat_history:List, query: str):
+async def mog_query(user_id: str, chat_history:List, query: str, source: str = "website"):
     url = "http://localhost:8020/api/chat"
     headers = {
         "accept": "application/json",
@@ -88,7 +88,8 @@ async def mog_query(user_id: str, chat_history:List, query: str):
     payload = {
         "userid": user_id,
         "chat_history": chat_history,
-        "user_query": query
+        "user_query": query,
+        "source": source
     }
 
     async with aiohttp.ClientSession() as session:
@@ -903,7 +904,7 @@ def display_web_model_selector(config, agent_name: str):
     return model
 
 
-async def process_query_real(query: str, optimized_agent, style: str, user_id: str = None, chat_history: List = None) -> Dict[str, Any]:
+async def process_query_real(query: str, optimized_agent, style: str, user_id: str = None, chat_history: List = None, source: str = "website") -> Dict[str, Any]:
     """Process query through Optimized Agent"""
     
     try:
@@ -911,7 +912,7 @@ async def process_query_real(query: str, optimized_agent, style: str, user_id: s
         
         # Single agent processing
         st.info("🚀 Optimized Agent processing query...")
-        result = await mog_query(user_id, chat_history, query)
+        result = await mog_query(user_id, chat_history, query, source)
         
         total_time = time.time() - start_time
         
@@ -1868,7 +1869,8 @@ def main():
                         agents_result["optimized_agent"], 
                         style,
                         user_id=query_target_id,
-                        chat_history=st.session_state.chat_history
+                        chat_history=st.session_state.chat_history,
+                        source="website" 
                     ))
                     
                     if result.get("success"):

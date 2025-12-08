@@ -65,6 +65,7 @@ SARVAM_SUPPORTED_LANGUAGES:set = {
     "Telugu"
 }
 
+
 @dataclass
 class AddBackgroundTask:
     """Dataclass for adding message task"""
@@ -94,6 +95,11 @@ class Config:
             "perplexity/sonar-pro", 
             "perplexity/sonar-reasoning-pro"
         ]
+        # Language detection configuration
+        self.language_detection_enabled = os.getenv('LANGUAGE_DETECTION_ENABLED', 'false').lower() == 'true'
+        self.language_detection_provider = os.getenv('LANGUAGE_DETECTION_PROVIDER', 'openrouter')
+        self.language_detection_model = os.getenv('LANGUAGE_DETECTION_MODEL', 'google/gemini-2.5-flash-lite-preview-09-2025')
+        
         # Language detection configuration
         self.language_detection_enabled = os.getenv('LANGUAGE_DETECTION_ENABLED', 'false').lower() == 'true'
         self.language_detection_provider = os.getenv('LANGUAGE_DETECTION_PROVIDER', 'openrouter')
@@ -175,6 +181,8 @@ class Config:
             base_url = "https://api.deepseek.com/v1"
         elif provider == 'sarvam':
             base_url = "https://api.sarvam.ai/v1"
+        elif provider == 'sarvam':
+            base_url = "https://api.sarvam.ai/v1"
         
         return LLMConfig(
             provider=provider,
@@ -253,6 +261,30 @@ class Config:
     def validate_web_model(self, model: str) -> bool:
         """Validate if web model is available"""
         return model in self.available_web_models
+    
+    def create_language_detection_config(self) -> LLMConfig:
+        """Create LLM configuration for language detection layer"""
+        if not self.language_detection_enabled:
+            raise ValueError("Language detection is disabled in configuration")
+        
+        if self.language_detection_provider not in self.available_providers:
+            raise ValueError(f"Language detection provider '{self.language_detection_provider}' not available")
+        
+        api_key = self.available_providers[self.language_detection_provider]
+        
+        # Provider-specific base URL
+        base_url = None
+        if self.language_detection_provider == 'openrouter':
+            base_url = 'https://openrouter.ai/api/v1'
+        
+        return LLMConfig(
+            provider=self.language_detection_provider,
+            model=self.language_detection_model,
+            api_key=api_key,
+            max_tokens=500,  # Language detection needs minimal tokens
+            timeout=30,  # Fast model, shorter timeout
+            base_url=base_url
+        )
     
     def create_language_detection_config(self) -> LLMConfig:
         """Create LLM configuration for language detection layer"""

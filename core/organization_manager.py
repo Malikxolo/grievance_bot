@@ -431,6 +431,8 @@ class OrganizationManager:
         logger.info(f"User {user_id} with role {role} permissions: {role_permissions}")
         return role_permissions.get(action, False)
     
+    
+    
     async def get_organization(self, org_id: str) -> Optional[Dict[str, Any]]:
         """Get organization data"""
         try:

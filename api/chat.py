@@ -4,11 +4,14 @@ from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from redis.asyncio import Redis
 from contextlib import asynccontextmanager
+from core.scraping import scrape_multiple_websites, crawl
+from urllib.parse import urlparse
 
 
 # Updated imports for new knowledge base manager
 from core.knowledge_base import (
     initialize_kb_manager,
+    create_global_collection,
     create_collection,
     upload_documents,
     query_documents,
@@ -64,6 +67,45 @@ import asyncio
 import chromadb
 from pymongo import MongoClient
 
+def coerce_or_drop_team_id(md: dict) -> dict:
+    # Operates in-place on md or returns new dict
+    if not isinstance(md, dict):
+        return md
+
+    tid = md.get("team_id")
+    if tid is None:
+        return md
+
+    # If already primitive, keep it
+    if isinstance(tid, (str, int, float, bool)):
+        return md
+
+    # If dict-like: prefer id/_id keys
+    if isinstance(tid, dict):
+        coerced = tid.get("id") or tid.get("_id")
+        if coerced is not None:
+            md["team_id"] = str(coerced)
+            logging.info("Coerced team_id object to primitive string for global/system upload", extra={"coerced_preview": str(coerced)[:200]})
+        else:
+            # can't coerce; drop it
+            md.pop("team_id", None)
+            logging.warning("Dropped complex team_id object for global/system upload (no id/_id found)", extra={"team_preview": str(tid)[:300]})
+        return md
+
+    
+    if isinstance(tid, (list, tuple)):
+        if all(isinstance(x, (str, int, float, bool)) or x is None for x in tid):
+            md["team_id"] = ",".join("" if x is None else str(x) for x in tid)
+        else:
+            md.pop("team_id", None)
+            logging.warning("Dropped complex team_id array for global/system upload", extra={"team_preview": str(tid)[:300]})
+        return md
+
+
+    md.pop("team_id", None)
+    logging.warning("Dropped unknown complex team_id for global/system upload", extra={"team_preview": str(tid)[:300]})
+    return md
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     
@@ -103,16 +145,32 @@ async def lifespan(app: FastAPI):
         use_premium_search=settings.use_premium_search
     )
     
+    # Routing layer config (decides simple vs CoT for WhatsApp)
     routing_config = config.create_llm_config(
-        provider=settings.router_provider,
-        model=settings.router_model,
+        provider=settings.routing_provider,
+        model=settings.routing_model,
         max_tokens=2000
+    )
+    
+    # WhatsApp-specific model configs
+    simple_whatsapp_config = config.create_llm_config(
+        provider=settings.simple_whatsapp_provider,
+        model=settings.simple_whatsapp_model,
+        max_tokens=4000
+    )
+    
+    cot_whatsapp_config = config.create_llm_config(
+        provider=settings.cot_whatsapp_provider,
+        model=settings.cot_whatsapp_model,
+        max_tokens=4000
     )
 
     brain_llm = LLMClient(brain_model_config)
     heart_llm = LLMClient(heart_model_config)
     indic_llm = LLMClient(indic_model_config)
     routing_llm = LLMClient(routing_config)
+    simple_whatsapp_llm = LLMClient(simple_whatsapp_config)
+    cot_whatsapp_llm = LLMClient(cot_whatsapp_config)
     # tool_manager = CSToolManager({})
     tool_manager = ToolManager(config, brain_llm, web_model_config, settings.use_premium_search)
 
@@ -157,7 +215,16 @@ async def lifespan(app: FastAPI):
             logging.warning(f"⚠️ Language detection initialization failed: {e}. Continuing without language detection.")
             language_detector_llm = None
 
-    optimizedAgent = OptimizedAgent(brain_llm, heart_llm, tool_manager, routing_llm, indic_llm, language_detector_llm)
+    optimizedAgent = OptimizedAgent(
+        brain_llm=brain_llm,
+        heart_llm=heart_llm,
+        tool_manager=tool_manager,
+        routing_llm=routing_llm,
+        simple_whatsapp_llm=simple_whatsapp_llm,
+        cot_whatsapp_llm=cot_whatsapp_llm,
+        indic_llm=indic_llm,
+        language_detector_llm=language_detector_llm
+    )
     # optimizedAgent = CustomerSupportAgent(brain_llm, heart_llm, tool_manager)
     
     # Initialize Organization Manager
@@ -183,7 +250,8 @@ async def lifespan(app: FastAPI):
         embedding_function=embedding_function,
         database_name="knowledge_base"
     )
-    await kb_manager.create_global_collection()
+    # Create global collection using module-level helper
+    await create_global_collection()
     
     logging.info("✅ Organization Manager and Knowledge Base Manager initialized")
 
@@ -238,6 +306,10 @@ class UpdateAgentsRequest(BaseModel):
     use_premium_search: Optional[bool]
     web_model: Optional[str]
 
+# Initialize config globally
+from core.config import Config
+config = Config()
+
 
 @router.post("/set_agents")
 async def set_brain_heart_agents(request: UpdateAgentsRequest):
@@ -284,8 +356,8 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         safe_log_user_data(user_id, 'brain_heart_chat', message_count=len(user_query))
         
         
-        # result = await optimizedAgent.process_query(user_query, chat_history, user_id, mode, source)
-        result = await optimizedAgent.process_query(user_query, chat_history, user_id)
+        # Pass mode and source so OptimizedAgent can map to appropriate prompt/model behavior
+        result = await optimizedAgent.process_query(user_query, chat_history, user_id, mode=mode, source=source)
         
         if result["success"]:
             safe_log_response(result, level='info')
@@ -369,11 +441,15 @@ async def get_collections_endpoint(
             user_id=user_id,
             team_id=team_id
         )
+        global_result = await list_collections(
+            org_id="org_global",
+            user_id="system"
+        )
         
         if result.get("success"):
             return JSONResponse(
                 content={
-                    "collections": result.get("collections"),
+                    "collections": [*result.get("collections"), *global_result.get("collections")],
                     "count": result.get("count")
                 }, 
                 status_code=200
@@ -425,6 +501,225 @@ async def get_collection_stats_endpoint(
             content={"error": str(e)}, 
             status_code=500
         )
+        
+        
+@router.post("/organizations/{org_id}/collections/{collection_name}/upload-from-web")
+async def upload_from_web_endpoint(
+    org_id: str,
+    collection_name: str,
+    user_id: str = Body(..., embed=True),
+    urls: List[str] = Body(..., embed=True),
+    max_concurrent: int = Body(5, embed=True),
+    chunk_size: int = Body(1000, embed=True)
+):
+    """
+    Scrape and upload documents from multiple web URLs to a collection.
+    
+    Args:
+        org_id: Organization ID
+        collection_name: Collection name
+        user_id: User ID
+        urls: List of URLs to scrape
+        max_concurrent: Maximum concurrent requests (default: 5)
+        chunk_size: Maximum characters per chunk (default: 1000)
+    """
+    try:
+        scraped_docs = await scrape_multiple_websites(
+            urls=urls,
+            max_concurrent=max_concurrent
+        )
+        
+        if not scraped_docs:
+            return JSONResponse(
+                content={"error": "No valid content could be scraped from the provided URLs."},
+                status_code=400
+            )
+        
+        # Process scraped content into chunks
+        chunks = []
+        metadatas = []
+        
+        for doc in scraped_docs:
+            url = doc.get("url", "unknown")
+            content = doc.get("content", "")
+            title = doc.get("title", "")
+            
+            if not content:
+                continue
+            
+            # Chunk the content
+            text_chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+            total_chunks = len(text_chunks)
+            
+            for i, chunk in enumerate(text_chunks):
+                chunks.append(chunk)
+                metadatas.append({
+                    "source": url,
+                    "title": title,
+                    "chunk_index": i,
+                    "total_chunks": total_chunks,
+                    "domain": urlparse(url).hostname,
+                    "source_type": "web"
+                })
+        
+        if not chunks:
+            return JSONResponse(
+                content={"error": "No text content found in scraped URLs."},
+                status_code=400
+            )
+        
+        # Upload to collection
+        result = await upload_documents(
+            org_id=org_id,
+            collection_name=collection_name,
+            documents=chunks,
+            user_id=user_id,
+            metadatas=metadatas
+        )
+        
+        if result.get("success"):
+            return JSONResponse(
+                content={
+                    "message": f"Successfully scraped and uploaded {len(scraped_docs)} URLs ({len(chunks)} chunks total).",
+                    "urls_scraped": len(scraped_docs),
+                    "total_chunks": len(chunks),
+                    "document_ids": result.get("document_ids")
+                },
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={"error": result.get("error", "Upload failed.")},
+                status_code=400
+            )
+            
+    except Exception as e:
+        logging.error(f"Error uploading from web: {e}", exc_info=True)
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
+        
+@router.post("/organizations/{org_id}/collections/{collection_name}/upload-from-crawl")
+async def upload_from_crawl_endpoint(
+    org_id: str,
+    collection_name: str,
+    user_id: str = Body(..., embed=True),
+    start_url: str = Body(..., embed=True),
+    max_depth: int = Body(2, embed=True),
+    max_links: int = Body(5, embed=True),
+    ignore_ids: bool = Body(True, embed=True),
+    chunk_size: int = Body(1000, embed=True)
+):
+    """
+    Crawl a website starting from a URL and upload discovered pages to a collection.
+    
+    Args:
+        org_id: Organization ID
+        collection_name: Collection name
+        user_id: User ID
+        start_url: Starting URL for the crawler
+        max_depth: Maximum crawl depth (default: 2)
+        max_links: Maximum number of links to crawl (default: 5)
+        ignore_ids: Ignore URL fragments/IDs (default: True)
+        chunk_size: Maximum characters per chunk (default: 1000)
+    """
+    try:
+        # Crawl the website to discover URLs
+        discovered_urls = await crawl(
+            start_url=start_url,
+            max_depth=max_depth,
+            max_links=max_links,
+            ignore_ids=ignore_ids
+        )
+        
+        if not discovered_urls:
+            return JSONResponse(
+                content={"error": "No URLs discovered during crawl."},
+                status_code=400
+            )
+        
+        logging.info(f"Discovered {len(discovered_urls)} URLs from crawl")
+        
+        # Scrape all discovered URLs
+        scraped_docs = await scrape_multiple_websites(
+            urls=discovered_urls,
+            max_concurrent=5
+        )
+        
+        if not scraped_docs:
+            return JSONResponse(
+                content={"error": "No valid content could be scraped from discovered URLs."},
+                status_code=400
+            )
+        
+        # Process scraped content into chunks
+        chunks = []
+        metadatas = []
+        
+        for doc in scraped_docs:
+            url = doc.get("url", "unknown")
+            content = doc.get("content", "")
+            title = doc.get("title", "")
+            
+            if not content:
+                continue
+            
+            # Chunk the content
+            text_chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+            total_chunks = len(text_chunks)
+            
+            for i, chunk in enumerate(text_chunks):
+                chunks.append(chunk)
+                metadatas.append({
+                    "source": url,
+                    "title": title,
+                    "chunk_index": i,
+                    "total_chunks": total_chunks,
+                    "domain": urlparse(url).hostname,
+                    "source_type": "web_crawl",
+                    "crawl_start_url": start_url
+                })
+        
+        if not chunks:
+            return JSONResponse(
+                content={"error": "No text content found in crawled pages."},
+                status_code=400
+            )
+        
+        # Upload to collection
+        result = await upload_documents(
+            org_id=org_id,
+            collection_name=collection_name,
+            documents=chunks,
+            user_id=user_id,
+            metadatas=metadatas
+        )
+        
+        if result.get("success"):
+            return JSONResponse(
+                content={
+                    "message": f"Successfully crawled and uploaded content from {len(discovered_urls)} URLs ({len(chunks)} chunks total).",
+                    "urls_discovered": len(discovered_urls),
+                    "urls_scraped": len(scraped_docs),
+                    "total_chunks": len(chunks),
+                    "document_ids": result.get("document_ids")
+                },
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={"error": result.get("error", "Upload failed.")},
+                status_code=400
+            )
+            
+    except Exception as e:
+        logging.error(f"Error uploading from crawl: {e}", exc_info=True)
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
+
 
 
 @router.post("/organizations/{org_id}/collections/{collection_name}/upload")

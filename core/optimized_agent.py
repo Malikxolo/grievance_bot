@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 class OptimizedAgent:
     """Single-pass agent that minimizes LLM calls while maintaining all functionality"""
     
-    def __init__(self, brain_llm, heart_llm, tool_manager, router_llm=None, indic_llm=None, language_detector_llm=None):
+    def __init__(self, brain_llm, heart_llm, tool_manager, routing_llm=None, simple_whatsapp_llm=None, cot_whatsapp_llm=None, indic_llm=None, language_detector_llm=None):
         self.brain_llm = brain_llm
         self.heart_llm = heart_llm
-        self.router_llm = router_llm if router_llm else heart_llm
+        self.routing_llm = routing_llm if routing_llm else heart_llm  # Routes WhatsApp queries
+        self.simple_whatsapp_llm = simple_whatsapp_llm if simple_whatsapp_llm else heart_llm  # Handles simple WhatsApp queries
+        self.cot_whatsapp_llm = cot_whatsapp_llm if cot_whatsapp_llm else brain_llm  # Handles complex WhatsApp queries (CoT)
         self.indic_llm = indic_llm if indic_llm else heart_llm
         self.language_detector_llm = language_detector_llm
         self.language_detection_enabled = language_detector_llm is not None
@@ -52,7 +54,10 @@ class OptimizedAgent:
         self._redis_available = tool_manager.redis_available
         
         logger.info(f"OptimizedAgent initialized with tools: {self.available_tools}")
-        logger.info(f"Router LLM: {'DEDICATED ✅' if router_llm else 'SHARED (heart_llm) ⚠️'}")
+        logger.info(f"WhatsApp Routing LLM: {'DEDICATED ✅' if routing_llm else 'SHARED (heart_llm) ⚠️'}")
+        logger.info(f"WhatsApp Simple Analysis LLM: {'DEDICATED ✅' if simple_whatsapp_llm else 'SHARED (heart_llm) ⚠️'}")
+        logger.info(f"WhatsApp CoT Analysis LLM: {'DEDICATED ✅' if cot_whatsapp_llm else 'SHARED (brain_llm) ⚠️'}")
+        logger.info(f"Comprehensive Analysis LLM (Website): brain_llm ✅")
         logger.info(f"Language Detection: {'ENABLED ✅' if self.language_detection_enabled else 'DISABLED ⚠️'}")
         logger.info(f"Redis caching: {'ENABLED ✅' if self.cache_manager.enabled else 'DISABLED ⚠️'}")
         if self._zapier_available:
@@ -97,7 +102,7 @@ class OptimizedAgent:
         
         return base_tools
     
-    async def process_query(self, query: str, chat_history: List[Dict] = None, user_id: str = None, mode:str = None, source: str = "whatsapp") -> Dict[str, Any]:
+    async def process_query(self, query: str, chat_history: List[Dict] = None, user_id: str = None, mode: str = None, source: Optional[str] = None) -> Dict[str, Any]:
         """Process query with minimal LLM calls and Redis caching"""
         self._start_worker_if_needed()
         logger.info(f" PROCESSING QUERY: '{query}'")
@@ -113,12 +118,22 @@ class OptimizedAgent:
         cached_analysis = None
         analysis = None
         analysis_time = 0.0
-        needs_cot = None  # Track which analysis path was taken
         detected_language = "english"  # Default language
         english_query = query  # Default to original query
         original_query = query  # Keep original for reference
         
         try:
+            # Normalize the source and restrict to allowed list for deterministic behavior
+            source = (source or "").strip().lower()
+            if source not in ("whatsapp", "website"):
+                source = "whatsapp"
+            logger.info(f"Resolved source: {source}")
+
+            # If mode not explicitly provided, derive it from source
+            if not mode:
+                mode = "transformative" if source == "website" else "whatsapp"
+            logger.info(f"Resolved mode: {mode}")
+
             # STEP 0: Language Detection Layer (if enabled)
             if self.language_detection_enabled:
                 logger.info(f"🌍 LANGUAGE DETECTION LAYER: Processing query...")
@@ -141,10 +156,9 @@ class OptimizedAgent:
             cached_analysis = await self.cache_manager.get_cached_query(processing_query, user_id)
             
             if cached_analysis:
-                logger.info(f"🎯 USING CACHED ANALYSIS - Skipping Brain LLM call")
+                logger.info(f"🎯 USING CACHED ANALYSIS - Skipping analysis LLM call")
                 analysis = cached_analysis
                 analysis_time = 0.0  # Cache hit = instant
-                needs_cot = None  # Unknown for cached analysis
             else:
                 # Retrieve memories
                 eli = time.time()
@@ -177,20 +191,21 @@ class OptimizedAgent:
                 logger.info(f" Retrieved memories: {memories}")
                 analysis_start = datetime.now()
                 
-                # ROUTING LAYER: Decide which analysis path to take
-                if source != "whatsapp":
-                    routing_decision = await self._route_query(query, chat_history, memories)
-                    needs_cot = routing_decision.get('needs_cot', True)
-                else:
-                    needs_cot = False  # WhatsApp = simple path
-                
-                # Route to appropriate analysis function
-                if needs_cot:
-                    logger.info(f"💰 COST PATH: COMPLEX (Qwen CoT) - Deep reasoning required")
+                # SOURCE-BASED ANALYSIS: WhatsApp uses routing layer, Website uses comprehensive
+                if source == "website":
+                    logger.info(f"💰 COST PATH: COMPREHENSIVE (Qwen CoT) - Website source")
                     analysis = await self._comprehensive_analysis(processing_query, chat_history, memories)
                 else:
-                    logger.info(f"💰 COST PATH: SIMPLE (Llama Fast) - Straightforward query")
-                    analysis = await self._simple_analysis(processing_query, chat_history, memories)
+                    # WhatsApp: Use routing layer to decide between simple and CoT
+                    logger.info(f"🧭 WHATSAPP SOURCE: Routing to determine analysis path...")
+                    routing_decision = await self._route_query(processing_query, chat_history, memories)
+                    
+                    if routing_decision["needs_cot"]:
+                        logger.info(f"💰 COST PATH: COT WHATSAPP (Nemotron CoT) - Complex query")
+                        analysis = await self._simple_analysis(processing_query, chat_history, memories, use_cot=True)
+                    else:
+                        logger.info(f"💰 COST PATH: SIMPLE WHATSAPP (Llama Fast) - Simple query")
+                        analysis = await self._simple_analysis(processing_query, chat_history, memories, use_cot=False)
                 
                 analysis_time = (datetime.now() - analysis_start).total_seconds()
                 logger.info(f" Analysis completed in {analysis_time:.2f}s")
@@ -325,16 +340,15 @@ class OptimizedAgent:
                 llm_calls = 1  # Only Heart (response generation)
                 analysis_path = "CACHED"
             else:
-                llm_calls = 1  # Router
-                llm_calls += 1  # Analysis (either CoT or Simple)
+                llm_calls = 1  # Analysis (either Comprehensive or Simple)
                 llm_calls += 1  # Heart (response generation)
                 if execution_mode == 'sequential':
                     llm_calls += 1  # Middleware for sequential tools
-                analysis_path = "COT" if needs_cot else "SIMPLE"
+                analysis_path = "COMPREHENSIVE" if source == "website" else "SIMPLE"
             
             logger.info(f" TOTAL PROCESSING TIME: {total_time:.2f}s ({llm_calls} LLM calls)")
             logger.info(f" ANALYSIS CACHE: {'HIT ✅' if cached_analysis else 'MISS ❌'}")
-            logger.info(f" ANALYSIS PATH: {analysis_path}")
+            logger.info(f" ANALYSIS PATH: {analysis_path} (source: {source})")
             
             formatted_links = "\nSources:\n\n >" + "\n > ".join(links[:3]) if links else ""
             
@@ -394,6 +408,82 @@ class OptimizedAgent:
             asyncio.create_task(self.background_task_worker())
             self._worker_started = True
             logging.info("✅ OptimizedAgent background worker started")
+    
+    async def _route_query(self, query: str, chat_history: List[Dict] = None, memories: str = "") -> Dict[str, Any]:
+        """
+        Router layer: Decide if query needs Chain-of-Thought reasoning (CoT) or simple analysis
+        Uses Meta Llama 3.3 70B for fast, cost-effective routing decision
+        """
+        context = chat_history[-2:] if chat_history else []
+        
+        routing_prompt = f"""Analyze this query and decide if it needs deep Chain-of-Thought reasoning or simple analysis.
+
+USER QUERY: {query}
+LONG-TERM CONTEXT (Memories): {memories}
+CONVERSATION HISTORY: {context}
+
+Your task: Determine query complexity level.
+
+NEEDS DEEP REASONING (Chain-of-Thought) when query involves:
+- Multiple dimensions requiring expansion thinking
+- Conditional logic with dependencies (if/then/else scenarios)
+- Multi-task decomposition with sequential dependencies
+- Ambiguous intent requiring deep semantic analysis
+- Complex business opportunity assessment with nuanced signals
+- Queries asking for comparisons, alternatives, or multi-angle exploration
+- Strategic thinking or planning required
+
+SIMPLE ANALYSIS when query involves:
+- Greetings, casual conversation
+- Single direct question with clear intent
+- Simple fact retrieval or definition
+- Obvious single tool selection
+- Straightforward information request
+- Already clear context, no ambiguity
+
+Think about:
+1. Does this query have hidden dimensions or is it straightforward?
+2. Does answering this require exploring multiple angles?
+3. Is the intent crystal clear or does it need interpretation?
+4. Will simple pattern matching suffice or is reasoning needed?
+
+Return ONLY valid JSON:
+{{
+  "needs_cot": true or false,
+  "reasoning": "brief explanation of complexity assessment"
+}}"""
+
+        try:
+            logger.info(f"🧭 ROUTING QUERY: '{query[:50]}...'")
+            
+            response = await self.routing_llm.generate(
+                messages=[{"role": "user", "content": routing_prompt}],
+                system_prompt="You assess query complexity for routing. Return JSON only.",
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            json_str = self._extract_json(response)
+            routing_decision = json.loads(json_str)
+            
+            needs_cot = routing_decision.get('needs_cot', True)  # Default to safe path
+            reasoning = routing_decision.get('reasoning', 'Routing decision made')
+            
+            logger.info(f"🧭 ROUTING DECISION: needs_cot={needs_cot}")
+            logger.info(f"   Reason: {reasoning}")
+            logger.info(f"   Path: {'COMPLEX (CoT Nemotron)' if needs_cot else 'SIMPLE (Llama Fast)'}")
+            
+            return {
+                "needs_cot": needs_cot,
+                "reasoning": reasoning
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Routing failed: {e}, defaulting to CoT (safe path)")
+            return {
+                "needs_cot": True,  # Safe default
+                "reasoning": f"Routing error: {str(e)}"
+            }
     
     def _build_sentiment_language_guide(self, sentiment: Dict) -> str:
         """Build sentiment-driven language guidance"""
@@ -496,86 +586,17 @@ Examples:
                 "english_translation": query,
                 "original_query": query
             }
-
-    async def _route_query(self, query: str, chat_history: List[Dict] = None, memories: str = "") -> Dict[str, Any]:
-        """
-        Router layer: Decide if query needs Chain-of-Thought reasoning (Qwen) or simple analysis (Llama)
-        Uses Meta Llama 3.3 70B for fast, cost-effective routing decision
-        """
-        context = chat_history[-2:] if chat_history else []
-        
-        routing_prompt = f"""Analyze this query and decide if it needs deep Chain-of-Thought reasoning or simple analysis.
-
-USER QUERY: {query}
-LONG-TERM CONTEXT (Memories): {memories}
-CONVERSATION HISTORY: {context}
-
-Your task: Determine query complexity level.
-
-NEEDS DEEP REASONING (Chain-of-Thought) when query involves:
-- Multiple dimensions requiring expansion thinking
-- Conditional logic with dependencies (if/then/else scenarios)
-- Multi-task decomposition with sequential dependencies
-- Ambiguous intent requiring deep semantic analysis
-- Complex business opportunity assessment with nuanced signals
-- Queries asking for comparisons, alternatives, or multi-angle exploration
-- Strategic thinking or planning required
-
-SIMPLE ANALYSIS when query involves:
-- Greetings, casual conversation
-- Single direct question with clear intent
-- Simple fact retrieval or definition
-- Obvious single tool selection
-- Straightforward information request
-- Already clear context, no ambiguity
-
-Think about:
-1. Does this query have hidden dimensions or is it straightforward?
-2. Does answering this require exploring multiple angles?
-3. Is the intent crystal clear or does it need interpretation?
-4. Will simple pattern matching suffice or is reasoning needed?
-
-Return ONLY valid JSON:
-{{
-  "needs_cot": true or false,
-  "reasoning": "brief explanation of complexity assessment"
-}}"""
-
-        try:
-            logger.info(f"🧭 ROUTING QUERY: '{query}...'")
-            
-            response = await self.router_llm.generate(
-                messages=[{"role": "user", "content": routing_prompt}],
-                system_prompt="You assess query complexity for routing. Return JSON only.",
-                temperature=0.1,
-                max_tokens=2000
-            )
-            
-            json_str = self._extract_json(response)
-            routing_decision = json.loads(json_str)
-            
-            needs_cot = routing_decision.get('needs_cot', True)  # Default to safe path
-            reasoning = routing_decision.get('reasoning', 'Routing decision made')
-            
-            logger.info(f"🧭 ROUTING DECISION: needs_cot={needs_cot}")
-            logger.info(f"   Reason: {reasoning}")
-            logger.info(f"   Path: {'COMPLEX (Qwen CoT)' if needs_cot else 'SIMPLE (Llama Fast)'}")
-            
-            return {
-                "needs_cot": needs_cot,
-                "reasoning": reasoning
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Routing failed: {e}, defaulting to CoT (safe path)")
-            return {
-                "needs_cot": True,  # Safe default
-                "reasoning": f"Routing error: {str(e)}"
-            }
     
-    async def _simple_analysis(self, query: str, chat_history: List[Dict] = None, memories: str = "") -> Dict[str, Any]:
+    async def _simple_analysis(self, query: str, chat_history: List[Dict] = None, memories: str = "", use_cot: bool = False) -> Dict[str, Any]:
         """
-        Fast-path analysis for simple queries using Meta Llama
+        WhatsApp analysis - uses either simple (Llama) or CoT (Nemotron) based on routing decision
+        
+        Args:
+            query: User's query
+            chat_history: Conversation context
+            memories: Long-term memories
+            use_cot: If True, use CoT WhatsApp model (Nemotron), else use simple model (Llama)
+        
         Returns same JSON structure as comprehensive analysis for compatibility
         """
         from datetime import datetime
@@ -727,9 +748,10 @@ Does the user's query relate to problems that Mochan-D's AI chatbot solution can
     
     If rag should be added, add ONE `rag` to tools_to_use
  
-   TOOL COUNT RULE: The number of tools in `tools_to_use` is determined by the actual work, not by sub-task count.
-   Read the tool description - if it operates on a single item (e.g., "Adds a row", "Sends an email", "Creates a record"), 
-   and user has N items to process, include that tool N times in the array.
+   TOOL COUNT: One tool per sub-task PLUS rag if triggered by the check above.
+   - 2 sub-tasks needing web_search + rag triggered → ["web_search", "web_search", "rag"]
+   - 1 sub-task needing web_search + rag triggered → ["web_search", "rag"]
+   - 1 web_search + 1 calculator + rag triggered → ["web_search", "calculator", "rag"]
 
    Use NO tools for:
    - Greetings, casual chat
@@ -826,12 +848,18 @@ Return ONLY valid JSON:
   "key_points_to_address": ["point1", "point2"]
 }}"""
         try:
-            logger.info(f"💨 SIMPLE ANALYSIS (Llama Fast Path)")
+            # Select appropriate model based on routing decision
+            if use_cot:
+                logger.info(f"🧠 COT WHATSAPP ANALYSIS (Nemotron - Complex query)")
+                analysis_llm = self.cot_whatsapp_llm
+            else:
+                logger.info(f"💨 SIMPLE WHATSAPP ANALYSIS (Llama - Simple query)")
+                analysis_llm = self.simple_whatsapp_llm
             
             messages = chat_history[-4:] if chat_history else []
             messages.append({"role": "user", "content": analysis_prompt})
             
-            response = await self.router_llm.generate(
+            response = await analysis_llm.generate(
                 messages,
                 system_prompt=f"You analyze queries as of {current_date}. Return valid JSON only.",
                 temperature=0.1,
@@ -883,7 +911,8 @@ Return ONLY valid JSON:
 
     async def _comprehensive_analysis(self, query: str, chat_history: List[Dict] = None, memories:str = "") -> Dict[str, Any]:
         """
-        Core semantic analysis + tool selection
+        Deep analysis using Qwen thinking model (brain_llm)
+        Used for Website source - provides Chain-of-Thought reasoning
         Returns structured analysis with tool execution plan
         """
         from datetime import datetime
@@ -1442,13 +1471,21 @@ Return ONLY the natural language instruction. Be specific about which resource t
             return original_query
 
     
-    async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, chat_history: List[Dict], memories:str="", mode:str="", source: str = "whatsapp", detected_language: str = "english", original_query: str = None) -> str:
+    async def _generate_response(self, query: str, analysis: Dict, tool_results: Dict, chat_history: List[Dict], memories: str = "", mode: str = "", source: Optional[str] = None, detected_language: str = "english", original_query: str = None) -> str:
         """Generate response with simple business mode switching like old system"""
         
         # Use original query if provided, otherwise use the query parameter
         if original_query is None:
             original_query = query
         
+        # Defensive source normalization for response generation
+        source = (source or "").strip().lower()
+        if source not in ("whatsapp", "website"):
+            source = "whatsapp"
+        # If mode not provided, derive it from source
+        if not mode:
+            mode = "transformative" if source == "website" else "whatsapp"
+
         logger.info(f"📝 RESPONSE GENERATION:")
         logger.info(f"   Detected Language: {detected_language}")
         logger.info(f"   Original Query: {original_query}")
@@ -1498,13 +1535,16 @@ Return ONLY the natural language instruction. Be specific about which resource t
             CRITICAL - DATA USAGE:
             - RAG results = User's uploaded documents (PRIMARY SOURCE - use these fully)
             - WEB_SEARCH results = Current internet information
+            - MongoDB/Zapier/Redis results = Action status (SUCCESS/ERROR/NEEDS CLARIFICATION)
             - Your training knowledge = Use ONLY as backup when no data provided
 
             ALWAYS prioritize the provided data as your source of truth.
 
             AVAILABLE DATA:
             {tool_data}
-
+            
+            LONG-TERM CONTEXT (Memories use if relevant): {memories}
+            
             TASK HANDLING INSTRUCTIONS:
 
             When user asks you to SUMMARIZE:

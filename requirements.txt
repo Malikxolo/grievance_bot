@@ -1,3 +1,4 @@
+
 # Brain-Heart Deep Research System Requirements
 # Comprehensive dependencies for all search and social media providers
 
@@ -68,3 +69,8 @@ fastapi-limiter
 redis
 pymongo
 pypdf2
+trafilatura
+
+# Subprocess MCP server runtime used by redis-mcp-server (provides `uvx` CLI)
+# Install `uv` so the `uvx` command is available for Redis MCP integration.
+uv>=0.7.0

@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from uuid import uuid4
 from datetime import datetime, timezone
 import chromadb
+from .organization_manager import OrganizationManager
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from pymongo import MongoClient
@@ -42,11 +43,17 @@ class KnowledgeBaseManager:
     Integrates ChromaDB for vector storage and MongoDB for metadata/permissions
     """
     
+    DEFAULT_ORG_ID = "default_org"
+    DEFAULT_ORG_NAME = "Default Organization"
+    DEFAULT_COLLECTION_NAME = "default_collection"
+    DEFAULT_USER_ID = "system"
+
+    
     def __init__(
         self,
         chroma_client: chromadb.Client,
         mongo_client: MongoClient,
-        org_manager,
+        org_manager: OrganizationManager,
         redis_client: Redis,
         embedding_function=None,
         database_name: str = "knowledge_base"
@@ -105,6 +112,11 @@ class KnowledgeBaseManager:
             return f"{org_id}_{team_id}"
         return f"{org_id}_global"
     
+    def _is_default_collection(self, org_id: str, collection_name: str) -> bool:
+        """Check if this is the default organization/collection"""
+        return (org_id == self.DEFAULT_ORG_ID and 
+                collection_name == self.DEFAULT_COLLECTION_NAME)
+    
     async def _set_org_cache(self, org_id:str, user_id:str):
         """Set organization data in Redis cache"""
         return await self.redis_client.set(user_id, org_id)
@@ -121,44 +133,6 @@ class KnowledgeBaseManager:
         """Get collection data from Redis cache"""
         return await self.redis_client.get(user_id)
     
-    async def create_global_collection(self):
-        """
-        Create a global collection for all organizations if it doesn't exist
-        """
-        try:
-            collection_name = "global_knowledge_base"
-            existing = await asyncio.to_thread(
-                self.collections_metadata.find_one,
-                {"org_id": "global", "collection_name": collection_name}
-            )
-            
-            if not existing:
-                chroma_collection = await asyncio.to_thread(
-                    self.chroma_client.get_or_create_collection,
-                    name=collection_name,
-                    embedding_function=self.embedding_function,
-                    metadata={"org_id": "global"}
-                )
-                
-                collection_doc = {
-                    "collection_id": str(uuid4()),
-                    "collection_name": collection_name,
-                    "description": "Global knowledge base accessible to all organizations",
-                    "org_id": "global",
-                    "team_id": None,
-                    "chroma_collection_name": collection_name,
-                    "created_by": "system",
-                    "created_at": datetime.now(timezone.utc),
-                    "metadata": {},
-                    "document_count": 0
-                }
-                
-                await asyncio.to_thread(
-                    self.collections_metadata.insert_one,
-                    collection_doc
-                )
-        except Exception as e:
-            print(f"Error creating global collection: {e}")
     
     async def create_collection(
         self,
@@ -310,13 +284,15 @@ class KnowledgeBaseManager:
             {"success": bool, "document_ids": List[str], "error": str}
         """
         try:
-            # Check permission
-            has_permission = await self.org_manager.check_permission(org_id, user_id, "upload_documents")
+            if not self._is_default_collection(org_id, collection_name):
+                has_permission = await self.org_manager.check_permission(org_id, user_id, "upload_documents")
+                
+                if not has_permission:
+                    return {"success": False, "error": "Permission denied"}
+            else:
+                logger.info(f"Using default collection - bypassing permissions for user {user_id}")
             
-            if not has_permission:
-                return {"success": False, "error": "Permission denied"}
             
-            # Get collection metadata
             collection_meta = await asyncio.to_thread(
                 self.collections_metadata.find_one,
                 {"org_id": org_id, "collection_name": collection_name}
@@ -404,6 +380,7 @@ class KnowledgeBaseManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
         
+        
     
     async def query_documents(
         self,
@@ -437,22 +414,29 @@ class KnowledgeBaseManager:
         try:
             logger.info(f"Query request - org_id: {org_id}, collection_name: {collection_name}, user_id: {user_id}, query: {query_text[:50]}...")
             
-            # Verify user is in organization
-            org = await self.org_manager.get_organization(org_id)
-            if not org:
-                logger.error(f"Organization not found: {org_id}")
-                return {"success": False, "error": "Organization not found"}
-            
-            if user_id not in org.get("members", {}):
-                logger.error(f"User {user_id} not in organization {org_id}")
-                return {"success": False, "error": "User not in organization"}
-            
-            # Get collection metadata from MongoDB
-            logger.info(f"Looking for collection in MongoDB: org_id={org_id}, collection_name={collection_name}")
-            collection_meta = await asyncio.to_thread(
-                self.collections_metadata.find_one,
-                {"org_id": org_id, "collection_name": collection_name}
-            )
+            if org != "org_default":
+                org = await self.org_manager.get_organization(org_id)
+                if not org:
+                    logger.error(f"Organization not found: {org_id}")
+                    return {"success": False, "error": "Organization not found"}
+                
+                if user_id not in org.get("members", {}):
+                    logger.error(f"User {user_id} not in organization {org_id}")
+                    return {"success": False, "error": "User not in organization"}
+                
+                # Get collection metadata from MongoDB
+                logger.info(f"Looking for collection in MongoDB: org_id={org_id}, collection_name={collection_name}")
+                collection_meta = await asyncio.to_thread(
+                    self.collections_metadata.find_one,
+                    {"org_id": org_id, "collection_name": collection_name}
+                )
+            else:
+                logger.info("Using default organization - bypassing permissions")
+                org = {"org_id": "org_default", "members": {user_id: {"role": "owner"}}}
+                collection_meta = await asyncio.to_thread(
+                    self.collections_metadata.find_one,
+                    {"org_id": "org_default", "collection_name": collection_name}
+                )
             
             if not collection_meta:
                 # List all collections for this org to help debug
@@ -1684,6 +1668,18 @@ async def get_org_cache(user_id: str) -> Optional[str]:
         raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
     return await kb_manager._get_org_cache(f"org_{user_id}")
 
+async def get_documents_by_metadata(
+    org_id: str,
+    collection_name: str,
+    user_id: str,
+    metadata_filter: Dict[str, Any],
+    limit: int = 100
+):
+    """Get documents by metadata filter"""
+    if kb_manager is None:
+        raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
+    return await kb_manager.get_documents_by_metadata(org_id, collection_name, user_id, metadata_filter, limit)
+
 async def set_org_cache(user_id: str, org_id: str) -> None:
     """Set organization ID in cache for a user"""
     if kb_manager is None:
@@ -1702,19 +1698,24 @@ async def set_collection_cache(user_id: str, collection_name: str) -> None:
         raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
     return await kb_manager._set_collection_cache(collection_name, f"collection_{user_id}")
 
-
-
-async def get_documents_by_metadata(
-    org_id: str,
-    collection_name: str,
-    user_id: str,
-    metadata_filter: Dict[str, Any],
-    limit: int = 100
-) -> Dict[str, Any]:
-    """Get documents by metadata filter"""
+async def create_global_collection() -> Dict[str, Any]:
+    """Create a global collection"""
     if kb_manager is None:
         raise Exception("KnowledgeBaseManager not initialized. Call initialize_kb_manager() first.")
-    return await kb_manager.get_documents_by_metadata(org_id, collection_name, user_id, metadata_filter, limit)
+    
+    await kb_manager.org_manager.create_organization(
+        org_name="global",
+        creator_name="system",
+        creator_id="system"
+    )
+    
+    await kb_manager.create_collection(
+        org_id="org_global",
+        collection_name="global_collection",
+        description="Global collection accessible to all users",
+        user_id="system",
+        team_id=""
+    )
 
 
 async def export_collection(

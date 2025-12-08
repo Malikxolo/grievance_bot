@@ -858,11 +858,12 @@ class RAGTool(BaseTool):
             logger.debug(f"Checking collections for user: {user_id}")
             org_id = await get_org_cache(user_id)
             if not org_id:
-                org_id = "default_org"
+                org_id = "org_global"
             collection_name = await get_collection_cache(user_id)
             if not collection_name:
-                collection_name = "default_collection"
-            
+                collection_name = "global_collection"
+                user_id = "system"
+
             # Query the user's collection
             result = await query_documents(org_id, collection_name, query, user_id, n_results=5)
             
