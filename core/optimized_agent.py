@@ -713,8 +713,6 @@ Does the user's query relate to problems that Mochan-D's AI chatbot solution can
 
    If business opportunity detected:
    - Set business_opportunity.detected = true
-   - Add "rag" to tools_to_use (fetch Mochan-D product docs)
-
 
    If query is about other business areas (accounting, inventory, website, etc.):
    - Set business_opportunity.detected = false
@@ -973,7 +971,7 @@ THINK THROUGH THESE QUESTIONS (use your intelligence, not rules):
    - Need for automation or always-available support?
    - Managing multiple platforms or scaling interactions?
    
-   If yes → this is a business context (you should include rag to provide Mochan-D context)
+   If yes → this is a business context
    If no → just answer the query directly
 
 4. MULTI-DIMENSIONAL TASK BREAKDOWN - FIND ALL THE HIDDEN ANGLES
@@ -1018,6 +1016,14 @@ THINK THROUGH THESE QUESTIONS (use your intelligence, not rules):
    - Write NATURAL LANGUAGE instructions, NOT structured JSON!
    - Example: "Send email to john@example.com with subject 'Meeting Tomorrow' and body 'Let's discuss the project'"
    - Zapier AI extracts the params from your instructions automatically
+   
+   AFTER SELECTING ALL TOOLS - APPLY RAG CHECK:
+   Add `rag` to tools_to_use if ANY of:
+   1. Any dimension is directly ABOUT Mochan-D
+   2. OR business_opportunity.detected = true
+   3. OR web_search is selected for ANY dimension
+   
+   If triggered, add ONE `rag` to your tools_to_use list.
 
 
 6. TOOL ORCHESTRATION - CAN DIFFERENT TOOLS RUN TOGETHER?
@@ -1054,6 +1060,7 @@ FINAL CHECK BEFORE YOU OUTPUT:
 - Did I use proper key names? (rag_0, web_search_0, web_search_1, etc.)
 - For complex queries: Did I generate at least 5-7 searches?
 - Did I keep the EXACT JSON structure below?
+- Did I add "rag" to tools_to_use if ANY web_search selected?
 
 OUTPUT THIS EXACT JSON STRUCTURE:
 
