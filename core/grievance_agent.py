@@ -61,6 +61,7 @@ class GrievanceAgent:
         
         # Backend URL for posting grievances
         self.backend_url = getenv("GRIEVANCE_BACKEND_URL")
+        self.resolve_ward_url = getenv("RESOLVE_WARD")
         
         logger.info(f"✅ GrievanceAgent initialized")
         logger.info(f"   Available tools: {self.available_tools}")
@@ -94,12 +95,14 @@ class GrievanceAgent:
             processing_query = english_query
             
             # STEP 2: Get memories
-            memory_results = await self.memory.search(processing_query[:100], user_id=user_id, limit=5)
-            memories = "\n".join([
-                f"- {item['memory']}" 
-                for item in memory_results.get("results", []) 
-                if item.get("memory")
-            ]) or "No previous context."
+            # memory_results = await self.memory.search(processing_query[:100], user_id=user_id, limit=5)
+            
+            # memories = "\n".join([
+            #     f"- {item['memory']}" 
+            #     for item in memory_results.get("results", []) 
+            #     if item.get("memory")
+            # ]) or "No previous context."
+            memories = ""
             logger.info(f"📝 Retrieved memories: {len(memories)} chars")
             
             # STEP 3: Analysis
@@ -140,15 +143,15 @@ class GrievanceAgent:
             logger.info(f"💬 Response generated in {response_time:.2f}s")
             
             # Add to memory in background
-            await self.task_queue.put(
-                AddBackgroundTask(
-                    func=partial(self.memory.add),
-                    params=(
-                        [{"role": "user", "content": original_query}, {"role": "assistant", "content": final_response}],
-                        user_id,
-                    ),
-                )
-            )
+            # await self.task_queue.put(
+            #     AddBackgroundTask(
+            #         func=partial(self.memory.add),
+            #         params=(
+            #             [{"role": "user", "content": original_query}, {"role": "assistant", "content": final_response}],
+            #             user_id,
+            #         ),
+            #     )
+            # )
             
             total_time = (datetime.now() - start_time).total_seconds()
             logger.info(f"⏱️ TOTAL: {total_time:.2f}s")
@@ -427,18 +430,46 @@ Return ONLY valid JSON:
         
         return results
     
+    async def _resolve_ward_from_location(self, address: str, city: str) -> Optional[str]:
+        """Resolve ward number from location using RAG tool"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"address": address, "city": city}
+                async with session.post(self.resolve_ward_url, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        ward = data.get("ward_name")
+                        logger.info(f"✅ Resolved ward: {ward} for location: {address}")
+                        return ward
+                    else:
+                        logger.error(f"❌ Ward resolution failed: {response.status}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ward resolution failed: {e}")
+            return None
+    
     async def _post_grievance_to_backend(self, params: dict, user_id: str):
         """Post successful grievance data to backend"""
         if not self.backend_url:
             logger.warning("⚠️ GRIEVANCE_BACKEND_URL not set, skipping backend posting")
             return
-            
+        
+        logger.info(f"params before posting: {params}")
+        location = params.get("location", "")
+        city = location.get("city", "")
+        district, ward = location.get("district", ""), location.get("ward", "")
+        if district and ward:
+            address = f"{ward}, {district}"
+            ward = await self._resolve_ward_from_location(address, city)
+            params['location']['ward'] = ward
+        
         try:
             payload = {
                 "user_id": user_id,
                 **params
             }
             logger.info(f"📤 Posting grievance to backend: {self.backend_url}")
+            
             logger.info(f"   Payload: {payload}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.backend_url, json=payload) as response:
