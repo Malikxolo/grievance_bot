@@ -85,7 +85,7 @@ class GrievanceAgent:
             # STEP 1: Language Detection (if enabled)
             if self.language_detection_enabled:
                 logger.info(f"🌍 LANGUAGE DETECTION LAYER...")
-                lang_result = await self._detect_and_translate(query)
+                lang_result = await self._detect_and_translate(query, chat_history)
                 detected_language = lang_result["detected_language"]
                 english_query = lang_result["english_translation"]
                 original_query = lang_result["original_query"]
@@ -218,12 +218,25 @@ class GrievanceAgent:
             self._worker_started = True
             logger.info("🔄 Background worker started")
     
-    async def _detect_and_translate(self, query: str) -> Dict[str, str]:
+    async def _detect_and_translate(self, query: str, chat_history: List[Dict] = None) -> Dict[str, str]:
         """Detect language and translate to English if needed"""
+        
+        # Format chat history for context
+        formatted_history = ""
+        if chat_history:
+            history_entries = []
+            for msg in chat_history[-5:]:  # Last 5 messages for context
+                role = msg.get('role', 'unknown').upper()
+                content = msg.get('content', '')
+                history_entries.append(f"{role}: {content}")
+            formatted_history = "\n".join(history_entries)
         
         detection_prompt = f"""Analyze this query and identify its language, then translate if needed.
 
-QUERY: "{query}"
+CONVERSATION HISTORY (for context - check previous turns to understand follow-ups):
+{formatted_history if formatted_history else 'No previous conversation.'}
+
+CURRENT QUERY: "{query}"
 
 YOUR TASK:
 1. Identify what language this query is written in
@@ -234,7 +247,7 @@ YOUR TASK:
    - For other languages, identify accurately (malayalam, tamil, telugu, etc.)
    - If romanized script of any Indian language → add "_romanized" (e.g., "malayalam_romanized")
 
-3. If the query is NOT in English, translate it to English while preserving the exact meaning and intent
+3. If the query is NOT in English, translate it to English while preserving the exact meaning and intent. Use conversation history to understand context (e.g., place names, follow-ups).
 4. If already in English, keep it as is
 
 Return ONLY valid JSON:
@@ -292,8 +305,6 @@ Examples:
         analysis_prompt = f"""You are analyzing queries for a grievance system.
     This system helps citizens register and track complaints with government departments.
 
-    DATE: {current_date}
-
     Available tools:
     - rag: Knowledge base retrieval (government policies, procedures, schemes, previous info)
     - grievance: Citizen complaints registration to DM office
@@ -302,6 +313,10 @@ Examples:
     - grievance_status: Check status of an existing grievance by ID
       Use for: status check, track complaint, meri shikayat ka status, complaint kahan tak pahunchi
       Requires: grievance ID (like GRV-12345 or complaint number)
+      
+    DATE: {current_date}
+
+    IMPORTANT: For any queries about dates, current date, today's date, or time-related information, always use the DATE provided above: {current_date}. Do not use any other date or make up dates.
 
     CONVERSATION HISTORY (for context - check previous turns to understand follow-ups):
     {formatted_history if formatted_history else 'No previous conversation.'}
@@ -720,6 +735,8 @@ Examples:
         # Format tool results
         tool_data = self._format_tool_results(tool_results)
         
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
         # Format chat history for embedding in prompt
         formatted_history = ""
         if chat_history:
@@ -737,6 +754,10 @@ Your role is to:
 - Provide information about government services and policies
 - Guide users through the complaint process
 - Be empathetic and supportive
+
+DATE: {current_date}
+
+IMPORTANT: For any queries about dates, current date, today's date, or time-related information, always use the DATE provided above: {current_date}. Do not use any other date or make up dates.
 
 CRITICAL - LANGUAGE RULE:
 User's detected language: {detected_language}
@@ -871,6 +892,13 @@ REMINDER - CRITICAL RULES:
 5. Keep response focused and actionable
 6. Respond in {detected_language} ONLY
 7. Use conversation history to understand context but respond to CURRENT query
+
+CRITICAL - CLARIFICATION RULE:
+If tool_results show "needs_clarification":
+- Use ONLY the clarification_message from the tool
+- DO NOT add your own questions
+- DO NOT ask for information not in "missing_fields"
+- Just politely relay what the tool is asking for
 
 Now respond in {detected_language}:"""
 
