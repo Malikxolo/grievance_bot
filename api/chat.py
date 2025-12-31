@@ -52,10 +52,7 @@ from core import (
     LLMClient,
     ToolManager, Config
 )
-from core.cs_tools import ToolManager as CSToolManager
-from core.optimized_agent import OptimizedAgent
-from core.grievance_agent import GrievanceAgent as DMGrievanceAgent
-from core.customer_support_agent import CustomerSupportAgent
+from core.sales_agent import SalesAgent
 from core.logging_security import (
     safe_log_response,
     safe_log_user_data,
@@ -165,6 +162,19 @@ async def lifespan(app: FastAPI):
         model=settings.cot_whatsapp_model,
         max_tokens=4000
     )
+    
+    # Sales-specific model configs
+    sales_analysis_config = config.create_llm_config(
+        provider=settings.sales_analysis_provider,
+        model=settings.sales_analysis_model,
+        max_tokens=4000
+    )
+    
+    sales_response_config = config.create_llm_config(
+        provider=settings.sales_response_provider,
+        model=settings.sales_response_model,
+        max_tokens=1000
+    )
 
     brain_llm = LLMClient(brain_model_config)
     heart_llm = LLMClient(heart_model_config)
@@ -172,7 +182,8 @@ async def lifespan(app: FastAPI):
     routing_llm = LLMClient(routing_config)
     simple_whatsapp_llm = LLMClient(simple_whatsapp_config)
     cot_whatsapp_llm = LLMClient(cot_whatsapp_config)
-    # tool_manager = CSToolManager({})
+    sales_analysis_llm = LLMClient(sales_analysis_config)
+    sales_response_llm = LLMClient(sales_response_config)
     tool_manager = ToolManager(config, brain_llm, web_model_config, settings.use_premium_search)
 
     # Initialize Zapier MCP integration
@@ -226,39 +237,17 @@ async def lifespan(app: FastAPI):
             logging.warning(f"⚠️ Language detection initialization failed: {e}. Continuing without language detection.")
             language_detector_llm = None
 
-    # Conditionally create agent based on GRIEVANCE_AGENT_ENABLED
+    # Create SalesAgent (only agent for this version)
     global agent
-    if settings.grievance_agent_enabled:
-        # Create GrievanceAgent for DM Office
-        logging.info("🏛️ GRIEVANCE_AGENT_ENABLED=true → Creating GrievanceAgent (DM Office mode)")
-        
-        grievance_agent_config = config.create_llm_config(
-            provider=settings.grievance_agent_provider,
-            model=settings.grievance_agent_model,
-            max_tokens=4000
-        )
-        grievance_agent_llm = LLMClient(grievance_agent_config)
-        
-        agent = DMGrievanceAgent(
-            llm=grievance_agent_llm,
-            tool_manager=tool_manager,
-            language_detector_llm=language_detector_llm
-        )
-        logging.info(f"✅ GrievanceAgent initialized with model: {settings.grievance_agent_model}")
-    else:
-        # Create OptimizedAgent (default)
-        logging.info("🧠 GRIEVANCE_AGENT_ENABLED=false → Creating OptimizedAgent (default mode)")
-        agent = OptimizedAgent(
-            brain_llm=brain_llm,
-            heart_llm=heart_llm,
-            tool_manager=tool_manager,
-            routing_llm=routing_llm,
-            simple_whatsapp_llm=simple_whatsapp_llm,
-            cot_whatsapp_llm=cot_whatsapp_llm,
-            indic_llm=indic_llm,
-            language_detector_llm=language_detector_llm
-        )
-        logging.info("✅ OptimizedAgent initialized")
+    logging.info("💰 Creating SalesAgent")
+    
+    agent = SalesAgent(
+        analysis_llm=sales_analysis_llm,
+        response_llm=sales_response_llm,
+        tool_manager=tool_manager,
+        language_detector_llm=language_detector_llm
+    )
+    logging.info(f"✅ SalesAgent initialized with analysis model: {settings.sales_analysis_model} and response model: {settings.sales_response_model}")
     
     # Initialize Organization Manager
     mongo_client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
@@ -291,7 +280,7 @@ async def lifespan(app: FastAPI):
     agent.worker_task = asyncio.create_task(
         agent.background_task_worker()
     )
-    logging.info(f"{'GrievanceAgent' if settings.grievance_agent_enabled else 'OptimizedAgent'} background worker started")
+    logging.info("SalesAgent background worker started")
 
     try:
         yield
@@ -377,7 +366,7 @@ async def set_brain_heart_agents(request: UpdateAgentsRequest):
 
 @router.post("/chat", dependencies=[Depends(RateLimiter(times=6, seconds=60))])
 async def chat_brain_heart_system(request: ChatMessage = Body(...)):
-    """Chat endpoint - uses GrievanceAgent or OptimizedAgent based on config"""
+    """Chat endpoint - uses SalesAgent"""
     
     try:
         user_id = request.userid
@@ -389,8 +378,7 @@ async def chat_brain_heart_system(request: ChatMessage = Body(...)):
         safe_log_user_data(user_id, 'brain_heart_chat', message_count=len(user_query))
         
         
-        # Pass mode and source to agent
-        result = await agent.process_query(user_query, chat_history, user_id, mode=mode, source=source)
+        result = await agent.process_query(user_query, chat_history, user_id)
         
         if result["success"]:
             safe_log_response(result, level='info')
