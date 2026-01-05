@@ -5,20 +5,44 @@ Simple version that definitely works with Python 3.12.3
 
 __version__ = "2.0.0"
 
-# Import exceptions first - these should always work
-from .exceptions import (
-    BrainHeartException,
-    LLMClientError,
-    BrainAgentError,
-    HeartAgentError,
-    ToolExecutionError,
-    ConfigurationError,
-    APIKeyError,
-    ModelNotAvailableError
-)
+# Define exceptions inline since exceptions.py is being removed
+class BrainHeartException(Exception):
+    """Base exception for Brain-Heart system"""
+    pass
 
-# Import config - minimal dependencies
-from .config import Config
+class LLMClientError(BrainHeartException):
+    """LLM client related errors"""
+    pass
+
+class BrainAgentError(BrainHeartException):
+    """Brain agent specific errors"""
+    pass
+
+class HeartAgentError(BrainHeartException):
+    """Heart agent specific errors"""
+    pass
+
+class ToolExecutionError(BrainHeartException):
+    """Tool execution errors"""
+    pass
+
+class ConfigurationError(BrainHeartException):
+    """Configuration related errors"""
+    pass
+
+class APIKeyError(ConfigurationError):
+    """API key related errors"""
+    pass
+
+class ModelNotAvailableError(LLMClientError):
+    """Model not available error"""
+    pass
+
+# Import config - may fail if dependencies missing
+try:
+    from .config import Config
+except ImportError:
+    Config = None
 
 # Import other components - may fail if dependencies missing
 try:
@@ -50,11 +74,12 @@ __all__ = [
     'ToolExecutionError',
     'ConfigurationError',
     'APIKeyError',
-    'ModelNotAvailableError',
-    'Config'
+    'ModelNotAvailableError'
 ]
 
 # Add optional components if they loaded
+if Config is not None:
+    __all__.append('Config')
 if LLMClient is not None:
     __all__.append('LLMClient')
 if ToolManager is not None:

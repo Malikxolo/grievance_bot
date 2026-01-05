@@ -15,7 +15,6 @@ import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from abc import ABC, abstractmethod
-from .exceptions import ToolExecutionError
 from .quota_manager import QuotaManager
 from .llm_client import LLMClient
 from .knowledge_base import query_documents, get_collection_cache, get_org_cache
@@ -24,6 +23,11 @@ import ast
 from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
+
+class ToolExecutionError(Exception):
+    """Tool execution errors"""
+    pass
+
 class BaseTool(ABC):
     """Base class for all tools"""
     
@@ -1112,217 +1116,6 @@ class ToolManager:
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize web search: {str(e)}")
-    
-    async def initialize_zapier_async(self) -> bool:
-        """
-        Initialize Zapier MCP integration (async).
-        
-        Call this after ToolManager creation to enable Zapier tools.
-        Zapier requires async initialization for network calls.
-        
-        Returns:
-            True if Zapier initialized successfully
-        """
-        # Check if Zapier should be enabled
-        if self._zapier_enabled is None:
-            # Check explicit ZAPIER_ENABLED toggle first
-            zapier_explicit = os.getenv("ZAPIER_ENABLED", "true").lower() == "true"
-            if not zapier_explicit:
-                logger.info("ℹ️ Zapier MCP integration disabled (ZAPIER_ENABLED=false)")
-                self._zapier_enabled = False
-                return False
-            
-            # Auto-detect from environment
-            mcp_enabled = os.getenv("MCP_ENABLED", "false").lower() == "true"
-            zapier_url = os.getenv("ZAPIER_MCP_SERVER_URL")
-            self._zapier_enabled = mcp_enabled and bool(zapier_url)
-        
-        if not self._zapier_enabled:
-            logger.info("ℹ️ Zapier MCP integration disabled (set MCP_ENABLED=true and ZAPIER_MCP_SERVER_URL)")
-            return False
-        
-        try:
-            # Import here to avoid circular imports and make it optional
-            from .mcp import ZapierToolManager, MCPSecurityManager
-            
-            logger.info("🔄 Initializing Zapier MCP integration...")
-            
-            # Create security manager
-            security = MCPSecurityManager()
-            
-            if not security.is_zapier_configured():
-                logger.warning("⚠️ Zapier MCP not configured - skipping")
-                return False
-            
-            # Create and initialize Zapier tool manager
-            self._zapier_manager = ZapierToolManager(security)
-            initialized = await self._zapier_manager.initialize()
-            
-            if initialized:
-                zapier_tools = self._zapier_manager.get_tool_names()
-                logger.info(f"  Zapier MCP integration initialized with {len(zapier_tools)} tools")
-                
-                # Log some example tools
-                if zapier_tools:
-                    examples = zapier_tools[:5]
-                    logger.info(f"   📋 Example tools: {', '.join(examples)}")
-                
-                return True
-            else:
-                logger.warning("⚠️ Zapier MCP initialization failed")
-                return False
-                
-        except ImportError as e:
-            logger.warning(f"⚠️ Zapier MCP module not available: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Zapier MCP initialization error: {e}")
-            return False
-    
-    async def initialize_mongodb_async(self) -> bool:
-        """
-        Initialize MongoDB MCP integration (async).
-        
-        Call this after ToolManager creation to enable MongoDB tools.
-        MongoDB requires async initialization for MCP server connection.
-        
-        Returns:
-            True if MongoDB initialized successfully
-        """
-        # Check if MongoDB is explicitly disabled via .env
-        mongodb_enabled = os.getenv("MONGODB_ENABLED", "true").lower() == "true"
-        if not mongodb_enabled:
-            logger.info("ℹ️ MongoDB MCP integration disabled (MONGODB_ENABLED=false)")
-            return False
-        
-        # Check if MongoDB connection string is configured
-        connection_string = os.getenv("MONGODB_MCP_CONNECTION_STRING")
-        
-        if not connection_string:
-            logger.info("ℹ️ MongoDB MCP integration disabled (MONGODB_MCP_CONNECTION_STRING not set)")
-            return False
-        
-        try:
-            # Import here to avoid circular imports
-            from .mcp.mongodb import MongoDBMCPClient
-            from .mcp.query_agent import QueryAgent
-            
-            logger.info("🔄 Initializing MongoDB MCP integration...")
-            
-            # Create MongoDB MCP client
-            self._mongodb_manager = MongoDBMCPClient(connection_string=connection_string)
-            
-            # Connect to MCP server
-            connected = await self._mongodb_manager.connect()
-            
-            if connected:
-                # CRITICAL: The MCP server is running but NOT connected to MongoDB yet!
-                # We need to explicitly call the 'connect' tool to establish database connection
-                logger.info("🔗 Establishing database connection...")
-                
-                try:
-                    connect_result = await self._mongodb_manager.execute_tool("connect", {
-                        "connectionString": connection_string
-                    })
-                    
-                    # Verify connection by listing databases
-                    verify_result = await self._mongodb_manager.execute_tool("list-databases", {})
-                    
-                    if hasattr(verify_result, 'result'):
-                        result_str = str(verify_result.result).lower()
-                        if "you need to connect" in result_str:
-                            logger.error("❌ MongoDB database connection failed - server says 'need to connect'")
-                            return False
-                        else:
-                            logger.info("  MongoDB database connection verified!")
-                    
-                except Exception as conn_err:
-                    logger.warning(f"⚠️ Database connection step: {conn_err}")
-                    # Continue anyway - some MCP versions may auto-connect
-                
-                # Create QueryAgent with shared LLM client
-                self._query_agent = QueryAgent(llm_client=self.llm_client)
-                
-                tools = await self._mongodb_manager.list_tools()
-                logger.info(f"  MongoDB MCP integration initialized with {len(tools)} tools")
-                
-                # Log some example tools
-                if tools:
-                    examples = [t.name for t in tools[:5]]
-                    logger.info(f"   📋 Example tools: {', '.join(examples)}")
-                
-                return True
-            else:
-                logger.warning("⚠️ MongoDB MCP connection failed")
-                return False
-                
-        except ImportError as e:
-            logger.warning(f"⚠️ MongoDB MCP module not available: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ MongoDB MCP initialization error: {e}")
-            return False
-    
-    async def initialize_redis_async(self) -> bool:
-        """
-        Initialize Redis MCP integration (async).
-        
-        Call this after ToolManager creation to enable Redis tools.
-        Redis requires async initialization for MCP server connection.
-        
-        Returns:
-            True if Redis initialized successfully
-        """
-        # Check if Redis is explicitly disabled via .env
-        redis_enabled = os.getenv("REDIS_ENABLED", "true").lower() == "true"
-        if not redis_enabled:
-            logger.info("ℹ️ Redis MCP integration disabled (REDIS_ENABLED=false)")
-            return False
-        
-        # Check if Redis URL is configured
-        redis_url = os.getenv("REDIS_MCP_URL")
-        
-        if not redis_url:
-            logger.info("ℹ️ Redis MCP integration disabled (REDIS_MCP_URL not set)")
-            return False
-        
-        try:
-            # Import here to avoid circular imports
-            from .mcp.redis import RedisMCPClient
-            from .mcp.query_agent import QueryAgent
-            
-            logger.info("🔄 Initializing Redis MCP integration...")
-            
-            # Create Redis MCP client
-            self._redis_manager = RedisMCPClient(redis_url=redis_url)
-            
-            # Connect to MCP server
-            connected = await self._redis_manager.connect()
-            
-            if connected:
-                # Create QueryAgent with shared LLM client if not already created
-                if self._query_agent is None:
-                    self._query_agent = QueryAgent(llm_client=self.llm_client)
-                
-                tools = await self._redis_manager.list_tools()
-                logger.info(f"  Redis MCP integration initialized with {len(tools)} tools")
-                
-                # Log some example tools
-                if tools:
-                    examples = [t.name for t in tools[:5]]
-                    logger.info(f"   📋 Example tools: {', '.join(examples)}")
-                
-                return True
-            else:
-                logger.warning("⚠️ Redis MCP connection failed")
-                return False
-                
-        except ImportError as e:
-            logger.warning(f"⚠️ Redis MCP module not available: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Redis MCP initialization error: {e}")
-            return False
     
     async def initialize_grievance_async(self) -> bool:
         """
